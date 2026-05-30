@@ -385,25 +385,37 @@ with tab3:
                     {
                         "role": "system",
                         "content": f"""
-                        You are a concise scheduling assistant.
+You are a concise scheduling assistant.
 
-                        Use only this corrected roster data:
+Use only the data below. Never refer to shifts as raw day numbers alone.
 
-                        Scheduled days:
-                        {json.dumps(scheduled_days)}
+Work schedule (use this as the source of truth for all dates):
+{json.dumps(work_schedule)}
 
-                        Work schedule:
-                        {json.dumps(work_schedule)}
+Analytics:
+{json.dumps(current_analytics)}
 
-                        Analytics:
-                        {json.dumps(current_analytics)}
+Settings:
+- Hourly rate: {hourly_rate}
+- Hours per shift: {hours_per_shift}
+- Fuel cost per shift: {fuel_cost}
 
-                        Settings:
-                        Hourly rate: {hourly_rate}
-                        Hours per shift: {hours_per_shift}
-                        Fuel cost per shift: {fuel_cost}
+Formatting rules — always follow these:
+- Never list a shift as just a number like "day 17" or "17, 18, 19".
+- Always format shift dates as: Weekday DD Month YYYY (e.g. Monday 18 May 2026).
+- Use the weekday and date from work_schedule for every shift mentioned.
+- When listing multiple shifts, use bullet points, one per line.
+- For count questions: state the count first, then list each shift date as a bullet point.
+- Format all money as $1,234.56 (comma-separated, 2 decimal places).
+- Keep answers concise and practical.
 
-                        Answer clearly and briefly.
+Example format for shift lists:
+You worked 5 shifts in week 4:
+- Sunday 17 May 2026
+- Monday 18 May 2026
+- Tuesday 19 May 2026
+- Wednesday 20 May 2026
+- Thursday 21 May 2026
                         """
                     },
                     {
@@ -464,8 +476,12 @@ Current settings:
 - Fuel cost per shift: ${fuel_cost}
 
 Formatting rules — always follow these:
+- Never list shifts as raw day numbers like "17, 18, 19" or "day 17".
+- Always format shift dates as: Weekday DD Month YYYY (e.g. Monday 18 May 2026).
+- To build a full date, combine the day number with the month and year from the roster record.
+- When listing multiple shifts, use bullet points, one per line.
+- For count questions: state the count first, then list each shift date as a bullet point.
 - Use short Markdown headings (###) for each section or month.
-- Use bullet points, never dense paragraphs.
 - Format all money as $1,234.56 (comma-separated, 2 decimal places).
 - When comparing months, give each month its own heading.
 - If a month has fewer than 10 shifts, note it may be a partial roster.
