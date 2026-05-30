@@ -39,9 +39,16 @@ load_dotenv()
 def get_openai_client():
     try:
         import streamlit as st
-        return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        key = st.secrets["OPENAI_API_KEY"]
     except Exception:
-        return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        key = os.getenv("OPENAI_API_KEY", "")
+    if not key or key.startswith("your_"):
+        st.error(
+            "⚠️ OpenAI API key is missing or not configured. "
+            "Add your key to Streamlit Cloud secrets or your local .env file as OPENAI_API_KEY."
+        )
+        st.stop()
+    return OpenAI(api_key=key)
 
 
 
@@ -431,19 +438,21 @@ You worked 5 shifts in week 4:
 
             recent_messages = st.session_state.roster_chat[-10:]
 
-            assistant_response = get_openai_client().chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt}
-                ] + recent_messages
-            )
-
-            reply = assistant_response.choices[0].message.content
-            reply = reply.replace("$", "\$")
-
-            st.session_state.roster_chat.append(
-                {"role": "assistant", "content": reply}
-            )
+            try:
+                assistant_response = get_openai_client().chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt}
+                    ] + recent_messages
+                )
+                reply = assistant_response.choices[0].message.content
+                reply = reply.replace("$", "\$")
+                st.session_state.roster_chat.append(
+                    {"role": "assistant", "content": reply}
+                )
+            except Exception as e:
+                st.error(f"⚠️ AI Assistant error: {e}")
+                st.session_state.roster_chat.pop()
 
             st.rerun()
 
@@ -519,19 +528,21 @@ Formatting rules — always follow these:
 
             recent_db_messages = st.session_state.saved_chat[-10:]
 
-            database_response = get_openai_client().chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt_db}
-                ] + recent_db_messages
-            )
-
-            db_reply = database_response.choices[0].message.content
-            db_reply = db_reply.replace("$", "\$")
-
-            st.session_state.saved_chat.append(
-                {"role": "assistant", "content": db_reply}
-            )
+            try:
+                database_response = get_openai_client().chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt_db}
+                    ] + recent_db_messages
+                )
+                db_reply = database_response.choices[0].message.content
+                db_reply = db_reply.replace("$", "\$")
+                st.session_state.saved_chat.append(
+                    {"role": "assistant", "content": db_reply}
+                )
+            except Exception as e:
+                st.error(f"⚠️ AI Assistant error: {e}")
+                st.session_state.saved_chat.pop()
 
             st.rerun()
 
@@ -544,6 +555,12 @@ Formatting rules — always follow these:
 with tab4:
 
     st.header("Saved Rosters")
+    st.info(
+        "☁️ **Cloud storage notice:** Saved rosters are stored in a local SQLite database. "
+        "On Streamlit Cloud, this data may reset when the app is rebooted or redeployed. "
+        "Export your data regularly using the Export tab to avoid losing it."
+    )
+    
 
     raw_df = load_rosters_dataframe()
 
