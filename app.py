@@ -446,7 +446,7 @@ You worked 5 shifts in week 4:
                     ] + recent_messages
                 )
                 reply = assistant_response.choices[0].message.content
-                reply = reply.replace("$", "\$")
+                reply = reply.replace("$", "\\$")
                 st.session_state.roster_chat.append(
                     {"role": "assistant", "content": reply}
                 )
@@ -536,7 +536,7 @@ Formatting rules — always follow these:
                     ] + recent_db_messages
                 )
                 db_reply = database_response.choices[0].message.content
-                db_reply = db_reply.replace("$", "\$")
+                db_reply = db_reply.replace("$", "\\$")
                 st.session_state.saved_chat.append(
                     {"role": "assistant", "content": db_reply}
                 )
