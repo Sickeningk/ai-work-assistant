@@ -96,6 +96,12 @@ st.sidebar.write(f"Fuel Cost Per Shift: ${fuel_cost}")
 if "roster_data" not in st.session_state:
     st.session_state.roster_data = None
 
+if "roster_chat" not in st.session_state:
+    st.session_state.roster_chat = []
+
+if "saved_chat" not in st.session_state:
+    st.session_state.saved_chat = []
+
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📅 Current Roster",
     "📊 Analytics",
