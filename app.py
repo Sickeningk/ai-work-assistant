@@ -414,9 +414,9 @@ with tab3:
             )
 
             st.subheader("Assistant Response")
-            st.write(
-                assistant_response.choices[0].message.content
-            )
+            response_text = assistant_response.choices[0].message.content
+            response_text = response_text.replace("$", "\$")
+            st.markdown(response_text)
 
     else:
 
@@ -482,9 +482,9 @@ Formatting rules — always follow these:
             )
 
             st.subheader("Database Assistant Response")
-            st.markdown(
-                database_response.choices[0].message.content
-            )
+            db_response_text = database_response.choices[0].message.content
+            db_response_text = db_response_text.replace("$", "\$")
+            st.markdown(db_response_text)
 
 
 with tab4:
