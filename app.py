@@ -37,7 +37,11 @@ load_dotenv()
 
 
 def get_openai_client():
-    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    try:
+        import streamlit as st
+        return OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    except Exception:
+        return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 

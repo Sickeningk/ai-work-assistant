@@ -7,8 +7,17 @@ import os
 load_dotenv()
 
 
+def get_api_key():
+    """Get OpenAI API key - tries st.secrets first, falls back to env var."""
+    try:
+        import streamlit as st
+        return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        return os.getenv("OPENAI_API_KEY")
+
+
 def analyze_roster_image(uploaded_file):
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = OpenAI(api_key=get_api_key())
 
     image_bytes = uploaded_file.read()
 
