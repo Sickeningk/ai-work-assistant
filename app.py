@@ -373,18 +373,23 @@ with tab3:
 
         st.subheader("Ask About Current Roster")
 
-        user_question = st.text_input(
-            "Ask about the currently loaded roster"
+        # Render chat history
+        for msg in st.session_state.roster_chat:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        user_question = st.chat_input(
+            "Ask about the currently loaded roster",
+            key="current_roster_chat_input"
         )
 
         if user_question:
 
-            assistant_response = get_openai_client().chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"""
+            st.session_state.roster_chat.append(
+                {"role": "user", "content": user_question}
+            )
+
+            system_prompt = f"""
 You are a concise scheduling assistant.
 
 Use only the data below. Never refer to shifts as raw day numbers alone.
@@ -416,19 +421,30 @@ You worked 5 shifts in week 4:
 - Tuesday 19 May 2026
 - Wednesday 20 May 2026
 - Thursday 21 May 2026
-                        """
-                    },
-                    {
-                        "role": "user",
-                        "content": user_question
-                    }
-                ]
+"""
+
+            recent_messages = st.session_state.roster_chat[-10:]
+
+            assistant_response = get_openai_client().chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt}
+                ] + recent_messages
             )
 
-            st.subheader("Assistant Response")
-            response_text = assistant_response.choices[0].message.content
-            response_text = response_text.replace("$", "\$")
-            st.markdown(response_text)
+            reply = assistant_response.choices[0].message.content
+            reply = reply.replace("$", "\$")
+
+            st.session_state.roster_chat.append(
+                {"role": "assistant", "content": reply}
+            )
+
+            st.rerun()
+
+        if st.session_state.roster_chat:
+            if st.button("Clear Current Roster Chat"):
+                st.session_state.roster_chat = []
+                st.rerun()
 
     else:
 
@@ -453,18 +469,23 @@ You worked 5 shifts in week 4:
             fuel_cost
         )
 
-        database_question = st.text_input(
-            "Ask about all saved rosters"
+        # Render saved rosters chat history
+        for msg in st.session_state.saved_chat:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        database_question = st.chat_input(
+            "Ask about all saved rosters",
+            key="saved_rosters_chat_input"
         )
 
         if database_question:
 
-            database_response = get_openai_client().chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"""
+            st.session_state.saved_chat.append(
+                {"role": "user", "content": database_question}
+            )
+
+            system_prompt_db = f"""
 You are a workforce analytics assistant. Answer clearly using clean Markdown.
 
 Saved roster data:
@@ -488,19 +509,30 @@ Formatting rules — always follow these:
 - State clearly if data is missing rather than guessing.
 - Do not invent missing months or shifts.
 - Keep answers concise and practical.
-                        """
-                    },
-                    {
-                        "role": "user",
-                        "content": database_question
-                    }
-                ]
+"""
+
+            recent_db_messages = st.session_state.saved_chat[-10:]
+
+            database_response = get_openai_client().chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt_db}
+                ] + recent_db_messages
             )
 
-            st.subheader("Database Assistant Response")
-            db_response_text = database_response.choices[0].message.content
-            db_response_text = db_response_text.replace("$", "\$")
-            st.markdown(db_response_text)
+            db_reply = database_response.choices[0].message.content
+            db_reply = db_reply.replace("$", "\$")
+
+            st.session_state.saved_chat.append(
+                {"role": "assistant", "content": db_reply}
+            )
+
+            st.rerun()
+
+        if st.session_state.saved_chat:
+            if st.button("Clear Saved Rosters Chat"):
+                st.session_state.saved_chat = []
+                st.rerun()
 
 
 with tab4:
