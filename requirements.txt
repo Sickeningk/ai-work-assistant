@@ -1,5 +1,5 @@
-streamlit
-openai
-pandas
-matplotlib
-python-dotenv
+streamlit>=1.32.0
+openai>=1.30.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+python-dotenv>=1.0.0
