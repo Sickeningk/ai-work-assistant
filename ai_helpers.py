@@ -11,9 +11,14 @@ def get_api_key():
     """Get OpenAI API key - tries st.secrets first, falls back to env var."""
     try:
         import streamlit as st
-        return st.secrets["OPENAI_API_KEY"]
+        key = st.secrets["OPENAI_API_KEY"]
     except Exception:
-        return os.getenv("OPENAI_API_KEY")
+        key = os.getenv("OPENAI_API_KEY", "")
+    if not key or key.startswith("your_"):
+        raise ValueError(
+            "OpenAI API key not configured. Please update your Streamlit secrets with a real sk-proj-... key."
+        )
+    return key
 
 
 def analyze_roster_image(uploaded_file):
