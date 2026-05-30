@@ -35,9 +35,10 @@ from forecasting import (
 
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
+
+def get_openai_client():
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 
 
 init_db()
@@ -374,7 +375,7 @@ with tab3:
 
         if user_question:
 
-            assistant_response = client.chat.completions.create(
+            assistant_response = get_openai_client().chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=[
                     {
@@ -442,7 +443,7 @@ with tab3:
 
         if database_question:
 
-            database_response = client.chat.completions.create(
+            database_response = get_openai_client().chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=[
                     {

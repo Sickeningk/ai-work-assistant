@@ -6,12 +6,10 @@ import os
 
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
-
 
 def analyze_roster_image(uploaded_file):
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
     image_bytes = uploaded_file.read()
 
     base64_image = base64.b64encode(
