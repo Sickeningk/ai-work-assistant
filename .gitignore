@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Local database (personal data — do not commit)
+*.db
+
+# Roster images (personal — do not commit)
+Images/
+
+# Streamlit local config
+.streamlit/secrets.toml
+
+# Old monolith backup
+app_original.py
+
+# Backups folder
+backups/
