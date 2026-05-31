@@ -335,10 +335,16 @@ def format_wa_answer(
     hours_per_shift: float,
     pc_rates: dict | None,
     week_label_str: str,
+    pc_tax_rates: dict | None = None,
+    has_adj: bool = False,
 ) -> str | None:
     """
     Build a fully deterministic answer for a Weekly Assistant question.
     Never calls OpenAI. All money is Python-calculated.
+
+    pc_rates      — full rates incl. effective_net_rate (requires entered_net > 0)
+    pc_tax_rates  — tax/HELP rates only, valid even without entered_net
+    has_adj       — True if the calibration payslip had previous-period adjustments
     """
     from math import ceil
 
@@ -350,6 +356,9 @@ def format_wa_answer(
 
     net_rate      = (pc_rates or {}).get("effective_net_rate")
     combined_rate = (pc_rates or {}).get("effective_combined_rate")
+    # Separate tax/HELP rates (valid without entered_net)
+    tax_rate      = (pc_tax_rates or pc_rates or {}).get("effective_tax_rate")
+    help_rate     = (pc_tax_rates or pc_rates or {}).get("effective_help_rate")
 
     # Refuse to calculate if no context
     no_shifts_msg = (
@@ -470,31 +479,77 @@ def format_wa_answer(
         if not selected_dates:
             return no_shifts_msg
         s = _sum(selected_dates)
-        gross = s["gross_income"]
+        gross      = s["gross_income"]
+        n_shifts   = s["total_shifts"]
+        tot_hours  = s.get("total_hours", round(n_shifts * hours_per_shift, 2))
+
         lines = [
             f"**Projected payslip — {week_label_str}**",
             "",
             f"| Line | Amount |",
             f"|---|---:|",
-            f"| Gross ({s['total_shifts']} shifts × {hours_per_shift} h @ \\${hourly_rate}/hr) "
+            f"| Gross ({n_shifts} shift{'s' if n_shifts != 1 else ''} "
+            f"× {hours_per_shift:.4g} h @ \\${hourly_rate:.2f}/hr) "
             f"| \\${gross:,.2f} |",
         ]
-        if combined_rate is not None and combined_rate > 0:
+
+        # Tax row — use separate tax_rate if available
+        any_breakdown = False
+        if tax_rate is not None and tax_rate > 0:
+            tax_withheld = round(gross * tax_rate, 2)
+            lines.append(
+                f"| Est. tax withheld ({tax_rate*100:.1f}%) "
+                f"| −\\${tax_withheld:,.2f} |"
+            )
+            any_breakdown = True
+        # HELP row
+        if help_rate is not None and help_rate > 0:
+            help_withheld = round(gross * help_rate, 2)
+            lines.append(
+                f"| Est. HELP withheld ({help_rate*100:.1f}%) "
+                f"| −\\${help_withheld:,.2f} |"
+            )
+            any_breakdown = True
+        # Combined fallback if no separate rates but combined is available
+        if not any_breakdown and combined_rate is not None and combined_rate > 0:
             withheld = round(gross * combined_rate, 2)
             lines.append(
                 f"| Est. tax & HELP withheld ({combined_rate*100:.1f}%) "
                 f"| −\\${withheld:,.2f} |"
             )
+            any_breakdown = True
+
+        # Take-home row
         if net_rate is not None and net_rate > 0:
-            net = round(gross * net_rate, 2)
+            net           = round(gross * net_rate, 2)
+            net_per_shift = round(net / n_shifts, 2) if n_shifts > 0 else 0.0
             lines.append(f"| **Est. take-home** | **\\${net:,.2f}** |")
-        lines.append("")
-        if not net_rate:
+            lines.append("")
             lines.append(
-                "⚠️ No payslip calibration — gross only. "
+                f"**Take-home per shift:** \\${net_per_shift:,.2f}  ·  "
+                f"**Total hours:** {tot_hours:.4g} h"
+            )
+        else:
+            lines.append("")
+
+        # Footer
+        lines.append("")
+        if not any_breakdown and not net_rate:
+            lines.append(
+                "⚠️ No payslip calibration found — showing gross only.  \n"
                 "Add your payslip in **🧾 Payslip Calibration** for tax/HELP estimates."
             )
         else:
+            if not net_rate:
+                lines.append(
+                    "💡 Enter your net pay in **🧾 Payslip Calibration → Calculate** "
+                    "to unlock the take-home estimate."
+                )
+            if has_adj:
+                lines.append(
+                    "⚠️ Your calibration includes previous-period adjustments — "
+                    "estimate may vary from a normal week."
+                )
             lines.append(
                 "*Estimates only. Based on Payslip Calibration effective rates. "
                 "Not tax advice.*"
@@ -829,34 +884,71 @@ with tab_wa:
                 f"**{_wa_week_end.strftime('%-d %b %Y')}**"
             )
 
-            # Metrics row
-            # Defensive fallback for total_hours in case of stale bytecode
+            # Pre-compute values used across metrics + captions
             _wa_total_hours = _wa_sum.get(
                 "total_hours",
                 round(_wa_sum["total_shifts"] * hours_per_shift, 2)
             )
-            _wm1, _wm2, _wm3, _wm4 = st.columns(4)
-            _wm1.metric("Shifts",       _wa_sum["total_shifts"])
-            _wm2.metric("Total Hours",  f"{_wa_total_hours:.1f} h")
-            _wm3.metric("Gross (est.)", f"${_wa_sum['gross_income']:,.2f}")
+            _wa_gross       = _wa_sum["gross_income"]
+            _wa_n_shifts    = _wa_sum["total_shifts"]
+            _wa_has_adj     = has_adjustments(_wa_pc_items) if _wa_pc_items else False
 
-            # Take-home / withheld
-            if _wa_pc_rates and _wa_pc_rates.get("effective_net_rate"):
-                _wa_net_rate = _wa_pc_rates["effective_net_rate"]
-                _wa_net_est  = round(_wa_sum["gross_income"] * _wa_net_rate, 2)
-                _wa_withheld = round(_wa_sum["gross_income"] - _wa_net_est, 2)
+            # Derive rates
+            _wa_net_rate  = (_wa_pc_rates or {}).get("effective_net_rate") or 0.0
+            _wa_tax_rate  = (_wa_pc_tax_rates or _wa_pc_rates or {}).get("effective_tax_rate") or 0.0
+            _wa_help_rate = (_wa_pc_tax_rates or _wa_pc_rates or {}).get("effective_help_rate") or 0.0
+            _wa_cr        = (_wa_pc_tax_rates or {}).get("effective_combined_rate") or 0.0
+
+            # Compute dollar amounts
+            _wa_net_est       = round(_wa_gross * _wa_net_rate, 2)  if _wa_net_rate  else 0.0
+            _wa_tax_est       = round(_wa_gross * _wa_tax_rate, 2)  if _wa_tax_rate  else 0.0
+            _wa_help_est      = round(_wa_gross * _wa_help_rate, 2) if _wa_help_rate else 0.0
+            _wa_combined_est  = round(_wa_gross * _wa_cr, 2)        if _wa_cr        else 0.0
+            _wa_net_per_shift = (
+                round(_wa_net_est / _wa_n_shifts, 2) if _wa_net_est and _wa_n_shifts > 0 else 0.0
+            )
+
+            # ── Metrics (4 columns) ───────────────────────────────────────
+            _wm1, _wm2, _wm3, _wm4 = st.columns(4)
+            _wm1.metric("Shifts",       _wa_n_shifts)
+            _wm2.metric("Total Hours",  f"{_wa_total_hours:.1f} h")
+            _wm3.metric("Gross (est.)", f"${_wa_gross:,.2f}")
+
+            if _wa_net_rate > 0:
                 _wm4.metric("Est. Take-Home", f"${_wa_net_est:,.2f}")
-                st.caption(
-                    f"Tax & HELP withheld (est.): −\\${_wa_withheld:,.2f}  ·  "
-                    f"Net rate: {_wa_net_rate*100:.1f}%  ·  "
-                    "Recalibrate after each payslip."
+            elif _wa_cr > 0:
+                _wm4.metric("Est. Withheld", f"−${_wa_combined_est:,.2f}")
+
+            # ── Detail caption ────────────────────────────────────────────
+            if _wa_net_rate > 0:
+                # Full calibration available — show breakdown
+                _wa_detail_parts = []
+                if _wa_tax_rate > 0:
+                    _wa_detail_parts.append(
+                        f"Tax withheld (est.): −\\${_wa_tax_est:,.2f} ({_wa_tax_rate*100:.1f}%)"
+                    )
+                if _wa_help_rate > 0:
+                    _wa_detail_parts.append(
+                        f"HELP withheld (est.): −\\${_wa_help_est:,.2f} ({_wa_help_rate*100:.1f}%)"
+                    )
+                if not _wa_detail_parts and _wa_cr > 0:
+                    _wa_detail_parts.append(
+                        f"Tax & HELP withheld (est.): −\\${_wa_combined_est:,.2f} ({_wa_cr*100:.1f}%)"
+                    )
+                _wa_detail_parts.append(
+                    f"Take-home/shift: \\${_wa_net_per_shift:,.2f}"
                 )
-            elif _wa_pc_tax_rates and _wa_pc_tax_rates.get("effective_combined_rate"):
-                _wa_cr        = _wa_pc_tax_rates["effective_combined_rate"]
-                _wa_w_est     = round(_wa_sum["gross_income"] * _wa_cr, 2)
-                _wm4.metric("Est. Withheld", f"−${_wa_w_est:,.2f}")
+                st.caption("  ·  ".join(_wa_detail_parts))
+                if _wa_has_adj:
+                    st.warning(
+                        "⚠️ Your calibration includes previous-period adjustments — "
+                        "this estimate may vary from a normal week."
+                    )
+            elif _wa_cr > 0:
+                # Items entered but no net pay yet
                 st.caption(
-                    f"Tax & HELP withheld (est.): −\\${_wa_w_est:,.2f} ({_wa_cr*100:.1f}%)  ·  "
+                    f"Tax & HELP withheld (est.): −\\${_wa_combined_est:,.2f} "
+                    f"({_wa_cr*100:.1f}%)  ·  "
                     "Enter your net pay in **🧾 Payslip Calibration → Calculate** "
                     "to unlock take-home estimate."
                 )
@@ -933,6 +1025,8 @@ with tab_wa:
                     hourly_rate, hours_per_shift,
                     _wa_pc_rates,
                     week_label(_wa_week_start),
+                    pc_tax_rates=_wa_pc_tax_rates,
+                    has_adj=has_adjustments(_wa_pc_items) if _wa_pc_items else False,
                 )
                 if _wa_det_reply is not None:
                     st.session_state.weekly_assistant_chat.append(
@@ -972,17 +1066,24 @@ with tab_wa:
                 _wa_sys += "No shifts entered for this week.\n"
 
             if _wa_pc_rates and _wa_ctx_sum and _wa_pc_rates.get("effective_net_rate"):
-                _r = _wa_pc_rates["effective_net_rate"]
+                _r   = _wa_pc_rates["effective_net_rate"]
+                _ctx_gross = _wa_ctx_sum["gross_income"]
                 _wa_sys += (
-                    f"Payslip net rate: {_r*100:.1f}%\n"
-                    f"Est. take-home: "
-                    f"${round(_wa_ctx_sum['gross_income'] * _r, 2):,.2f}\n"
+                    f"Payslip calibration — "
+                    f"net rate: {_r*100:.1f}%, "
+                    f"tax rate: {(_wa_pc_tax_rates or {}).get('effective_tax_rate', 0)*100:.1f}%, "
+                    f"HELP rate: {(_wa_pc_tax_rates or {}).get('effective_help_rate', 0)*100:.1f}%\n"
+                    f"Est. take-home this week: ${round(_ctx_gross * _r, 2):,.2f}\n"
+                    f"Est. take-home/shift: "
+                    f"${round(_ctx_gross * _r / _wa_ctx_sum['total_shifts'], 2) if _wa_ctx_sum['total_shifts'] > 0 else 0:,.2f}\n"
                 )
+                if has_adjustments(_wa_pc_items):
+                    _wa_sys += "Note: calibration includes previous-period adjustments.\n"
             elif _wa_pc_tax_rates and _wa_pc_tax_rates.get("effective_combined_rate"):
                 _cr = _wa_pc_tax_rates["effective_combined_rate"]
                 _wa_sys += (
                     f"Est. tax & HELP rate: {_cr*100:.1f}% "
-                    "(take-home not calibrated)\n"
+                    "(take-home not yet calibrated — net pay not entered)\n"
                 )
             else:
                 _wa_sys += "No payslip calibration available.\n"
@@ -2245,8 +2346,48 @@ with tab_pc:
     st.header("🧾 Payslip Calibration")
     st.caption(
         "Enter your payslip line items manually to break down earnings, tax, and HELP. "
-        "Use this to understand your effective rates and flag previous-period adjustments."
+        "Once calculated, Weekly Assistant uses these rates to estimate your take-home pay."
     )
+
+    # ── Calibration status banner ─────────────────────────────────────────
+    _ps_status_items  = st.session_state.payslip_lines
+    _ps_status_gross  = pc_total_gross(_ps_status_items) if _ps_status_items else 0.0
+    _ps_status_enet   = st.session_state.wa_entered_net
+    _ps_calibrated    = bool(_ps_status_items) and _ps_status_gross > 0 and _ps_status_enet > 0
+    _ps_partial       = bool(_ps_status_items) and _ps_status_gross > 0 and _ps_status_enet <= 0
+
+    if _ps_calibrated:
+        _ps_full_rates = pc_effective_rates(_ps_status_items, _ps_status_enet)
+        _ps_net_r   = _ps_full_rates.get("effective_net_rate") or 0.0
+        _ps_tax_r   = _ps_full_rates.get("effective_tax_rate") or 0.0
+        _ps_help_r  = _ps_full_rates.get("effective_help_rate") or 0.0
+        _ps_per_100 = round(_ps_net_r * 100, 2)
+        st.success(
+            f"✅ **Calibrated** — Effective net rate: **{_ps_net_r*100:.1f}%**  ·  "
+            f"Tax: {_ps_tax_r*100:.1f}%  ·  "
+            f"HELP: {_ps_help_r*100:.1f}%  ·  "
+            f"Take-home per \\$100 gross: \\${_ps_per_100:.2f}"
+        )
+        if has_adjustments(_ps_status_items):
+            st.warning(
+                "⚠️ Your calibration includes **previous-period adjustments**. "
+                "Weekly Assistant take-home estimates may vary from a normal week."
+            )
+    elif _ps_partial:
+        _ps_tax_only = pc_effective_rates(_ps_status_items, 0.0)
+        _ps_cr_pct   = (_ps_tax_only.get("effective_combined_rate") or 0.0) * 100
+        st.info(
+            f"⚪ **Partially calibrated** — Tax & HELP rate: {_ps_cr_pct:.1f}%  ·  "
+            "Enter your net pay in Step 3 and click **📊 Calculate** "
+            "to unlock take-home estimates in Weekly Assistant."
+        )
+    else:
+        st.info(
+            "⚪ **Not calibrated yet.** "
+            "Complete Steps 1–3 below and click **📊 Calculate** "
+            "to save your payslip rates to Weekly Assistant."
+        )
+
     st.info("📋 **Manual entry only.** Payslip image/OCR upload is not available yet.")
 
     # -----------------------------------------------------------------------
@@ -2356,22 +2497,30 @@ with tab_pc:
     # -----------------------------------------------------------------------
     # Section 3 — Payslip Summary
     # -----------------------------------------------------------------------
-    st.subheader("Step 3 — Payslip Summary")
+    st.subheader("Step 3 — Calculate & Save to Weekly Assistant")
+    st.caption(
+        "Enter your net pay from the payslip, then click **Calculate**. "
+        "This saves your effective tax and take-home rates so **🗓 Weekly Assistant** "
+        "can estimate your weekly take-home pay automatically."
+    )
 
     _items = st.session_state.payslip_lines
 
     # Entered net pay for reconciliation
     _ps_entered_net = st.number_input(
-        "Entered Net Pay (from payslip, $)",
+        "Net Pay (from payslip, $)",
         min_value=0.0,
-        value=0.0,
+        value=st.session_state.wa_entered_net if st.session_state.wa_entered_net > 0 else 0.0,
         step=0.01,
         format="%.2f",
         key="ps_entered_net",
-        help="Enter the net pay figure shown on your payslip. Used for reconciliation only.",
+        help=(
+            "The net pay (take-home) shown on your payslip. "
+            "Used to calculate your effective take-home rate for Weekly Assistant."
+        ),
     )
 
-    if st.button("📊 Calculate", key="ps_calculate"):
+    if st.button("📊 Calculate & Save Rates to Weekly Assistant", key="ps_calculate"):
 
         # Store entered net pay so Weekly Assistant can use the effective net rate
         st.session_state.wa_entered_net = _ps_entered_net
@@ -2390,6 +2539,14 @@ with tab_pc:
         _rates     = pc_effective_rates(_items, _ps_entered_net)
         _recon     = pc_reconcile(_items, _ps_entered_net)
         _hr        = derived_hourly_rate(_items)
+
+        # Confirm rates saved to Weekly Assistant
+        if _ps_entered_net > 0 and _rates.get("effective_net_rate"):
+            _saved_net_pct = round(_rates["effective_net_rate"] * 100, 1)
+            st.success(
+                f"✅ Rates saved — effective net rate **{_saved_net_pct}%**. "
+                "Go to **🗓 Weekly Assistant** to see your estimated take-home."
+            )
 
         # Adjustment warning banner
         if has_adjustments(_items):
