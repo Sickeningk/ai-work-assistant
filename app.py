@@ -341,7 +341,7 @@ if "weekly_entry" not in st.session_state:
 tab_we, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🗓 Weekly Entry",
     "📅 Current Roster",
-    "📊 Analytics",
+    "📊 This Week",
     "🤖 AI Assistant",
     "📚 History",
     "📈 Forecasting",
@@ -634,96 +634,154 @@ with tab1:
 
 with tab2:
 
-    st.header("Analytics Dashboard")
+    st.header("📊 This Week")
 
-    raw_df = load_rosters_dataframe()
+    # -----------------------------------------------------------------------
+    # Section A — Weekly Dashboard (primary)
+    # -----------------------------------------------------------------------
+    _tw_df = load_weekly_rosters_dataframe()
 
-    if raw_df.empty:
-
-        st.write("No saved roster data yet.")
-
+    if _tw_df.empty:
+        st.info(
+            "No weekly roster selected yet. "
+            "Go to **🗓 Weekly Entry** to select this week's shifts."
+        )
     else:
+        import json as _json_tw
+        import datetime as _dt_tw
 
-        saved_df = enrich_saved_rosters(
-            raw_df,
-            hourly_rate,
-            hours_per_shift,
-            fuel_cost
+        # Build display labels and sort most-recent first
+        _tw_df = _tw_df.sort_values("week_start_date", ascending=False).reset_index(drop=True)
+
+        _tw_labels = []
+        for _, _r in _tw_df.iterrows():
+            try:
+                _ws = _dt_tw.date.fromisoformat(_r["week_start_date"])
+                _we = _dt_tw.date.fromisoformat(_r["week_end_date"])
+                _tw_labels.append(
+                    f"Sun {_ws.strftime('%-d %b')} — Sat {_we.strftime('%-d %b %Y')}"
+                )
+            except Exception:
+                _tw_labels.append(_r["week_start_date"])
+
+        _tw_selected_label = st.selectbox(
+            "View week:",
+            options=_tw_labels,
+            index=0,
+            key="tw_week_selector",
         )
+        _tw_idx = _tw_labels.index(_tw_selected_label)
+        _tw_row = _tw_df.iloc[_tw_idx]
 
-        saved_df = pd.DataFrame(saved_df)
+        # Parse saved dates and compute summary
+        _tw_dates_iso = _json_tw.loads(_tw_row["scheduled_dates"])
+        _tw_dates = [_dt_tw.date.fromisoformat(d) for d in _tw_dates_iso]
+        _tw_summary = weekly_summary(_tw_dates, hourly_rate, hours_per_shift, fuel_cost)
 
-        total_rosters = len(saved_df)
-        total_shifts_history = saved_df["total_shifts"].sum()
-        total_gross_history = saved_df["gross_income"].sum()
-        total_net_history = saved_df["net_income"].sum()
-        avg_income_history = saved_df["gross_income"].mean()
+        st.caption(f"Source: {_tw_row['source']} · Saved: {_tw_row['created_at']}")
+        st.divider()
 
-        best_month_row = saved_df.sort_values(
-            "total_shifts",
-            ascending=False
-        ).iloc[0]
+        # Metrics row 1
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        _m1.metric("Week Start", _tw_row["week_start_date"])
+        _m2.metric("Week End",   _tw_row["week_end_date"])
+        _m3.metric("Total Shifts",   _tw_summary["total_shifts"])
+        _m4.metric("Weekend Shifts", _tw_summary["weekend_shifts"])
 
-        col1, col2, col3, col4 = st.columns(4)
+        # Metrics row 2
+        _m5, _m6, _m7 = st.columns(3)
+        _m5.metric("Gross Income",      f"${_tw_summary['gross_income']:,.2f}")
+        _m6.metric("After-Fuel Income", f"${_tw_summary['after_fuel_income']:,.2f}")
+        _m7.metric("Est. Pay / Shift",  f"${_tw_summary['per_shift_after_fuel']:,.2f}")
 
-        col1.metric("Rosters Saved", total_rosters)
-        col2.metric("Total Shifts", int(total_shifts_history))
-        col3.metric("Total Gross", f"${round(total_gross_history, 2)}")
-        col4.metric("Total Net", f"${round(total_net_history, 2)}")
+        # Shift list
+        if _tw_dates:
+            with st.expander("Shift dates this week"):
+                for _sd in sorted(_tw_dates):
+                    st.write(f"- {_sd.strftime('%A %-d %B %Y')}")
 
-        st.write(
-            f"Average Monthly Income: ${round(avg_income_history, 2)}"
-        )
+        # Shifts-per-week trend chart (all saved weeks, oldest → newest)
+        if len(_tw_df) > 1:
+            st.divider()
+            st.subheader("Shifts per week — trend")
+            _chart_df = _tw_df.copy()
+            _chart_df["shifts"] = _chart_df["scheduled_dates"].apply(
+                lambda x: len(_json_tw.loads(x))
+            )
+            _chart_df["label"] = _chart_df["week_start_date"].apply(
+                lambda x: _dt_tw.date.fromisoformat(x).strftime("%-d %b")
+            )
+            _chart_df = _chart_df.sort_values("week_start_date")
 
-        st.write(
-            f"Best Month: {best_month_row['month']} "
-            f"{best_month_row['year']} "
-            f"({best_month_row['total_shifts']} shifts)"
-        )
+            _fig_tw, _ax_tw = plt.subplots(figsize=(10, 3))
+            _ax_tw.bar(_chart_df["label"], _chart_df["shifts"], color="#4C9BE8")
+            _ax_tw.set_title("Shifts by Week")
+            _ax_tw.set_ylabel("Shifts")
+            _ax_tw.set_xlabel("Week starting")
+            _ax_tw.tick_params(axis="x", rotation=45)
+            _fig_tw.tight_layout()
+            st.pyplot(_fig_tw)
 
-        st.subheader("Charts & Trends")
+    # -----------------------------------------------------------------------
+    # Section B — Previous Roster History (collapsed, legacy monthly data)
+    # -----------------------------------------------------------------------
+    st.divider()
+    with st.expander("📂 Previous Roster History", expanded=False):
+        st.caption("Monthly rosters saved via image upload or manual entry.")
 
-        saved_df["label"] = (
-            saved_df["month"] +
-            " " +
-            saved_df["year"].astype(str)
-        )
+        _hist_raw = load_rosters_dataframe()
 
-        fig1, ax1 = plt.subplots(figsize=(10, 4))
-        ax1.bar(
-            saved_df["label"],
-            saved_df["total_shifts"]
-        )
-        ax1.set_title("Shifts by Month")
-        ax1.set_ylabel("Shifts")
-        ax1.set_xlabel("Month")
-        ax1.tick_params(axis="x", rotation=45)
-        fig1.tight_layout()
-        st.pyplot(fig1)
+        if _hist_raw.empty:
+            st.write("No monthly roster history.")
+        else:
+            _hist_df = pd.DataFrame(
+                enrich_saved_rosters(_hist_raw, hourly_rate, hours_per_shift, fuel_cost)
+            )
 
-        fig2, ax2 = plt.subplots(figsize=(10, 4))
-        ax2.bar(
-            saved_df["label"],
-            saved_df["gross_income"]
-        )
-        ax2.set_title("Gross Income by Month")
-        ax2.set_ylabel("Income ($)")
-        ax2.set_xlabel("Month")
-        ax2.tick_params(axis="x", rotation=45)
-        fig2.tight_layout()
-        st.pyplot(fig2)
+            _h_total = len(_hist_df)
+            _h_shifts = int(_hist_df["total_shifts"].sum())
+            _h_gross = _hist_df["gross_income"].sum()
+            _h_net = _hist_df["net_income"].sum()
+            _h_avg = _hist_df["gross_income"].mean()
+            _h_best = _hist_df.sort_values("total_shifts", ascending=False).iloc[0]
 
-        fig3, ax3 = plt.subplots(figsize=(10, 4))
-        ax3.bar(
-            saved_df["label"],
-            saved_df["net_income"]
-        )
-        ax3.set_title("Net Income by Month")
-        ax3.set_ylabel("Income ($)")
-        ax3.set_xlabel("Month")
-        ax3.tick_params(axis="x", rotation=45)
-        fig3.tight_layout()
-        st.pyplot(fig3)
+            _hc1, _hc2, _hc3, _hc4 = st.columns(4)
+            _hc1.metric("Rosters Saved", _h_total)
+            _hc2.metric("Total Shifts",  _h_shifts)
+            _hc3.metric("Total Gross",   f"${_h_gross:,.2f}")
+            _hc4.metric("Total Net",     f"${_h_net:,.2f}")
+
+            st.caption(
+                f"Average monthly income: \\${_h_avg:,.2f} · "
+                f"Best month: {_h_best['month']} {_h_best['year']} "
+                f"({_h_best['total_shifts']} shifts)"
+            )
+
+            _hist_df["label"] = _hist_df["month"] + " " + _hist_df["year"].astype(str)
+
+            _fh1, _ah1 = plt.subplots(figsize=(10, 3))
+            _ah1.bar(_hist_df["label"], _hist_df["total_shifts"])
+            _ah1.set_title("Shifts by Month")
+            _ah1.set_ylabel("Shifts")
+            _ah1.tick_params(axis="x", rotation=45)
+            _fh1.tight_layout()
+            st.pyplot(_fh1)
+
+            _fh2, _ah2 = plt.subplots(figsize=(10, 3))
+            _ah2.bar(_hist_df["label"], _hist_df["gross_income"])
+            _ah2.set_title("Gross Income by Month")
+            _ah2.set_ylabel("Income ($)")
+            _ah2.tick_params(axis="x", rotation=45)
+            _fh2.tight_layout()
+            st.pyplot(_fh2)
+
+            _fh3, _ah3 = plt.subplots(figsize=(10, 3))
+            _ah3.bar(_hist_df["label"], _hist_df["net_income"])
+            _ah3.set_title("Net Income by Month")
+            _ah3.set_ylabel("Income ($)")
+            _ah3.tick_params(axis="x", rotation=45)
+            _fh3.tight_layout()
+            st.pyplot(_fh3)
 
 
 with tab3:
