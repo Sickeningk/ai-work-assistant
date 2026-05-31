@@ -60,6 +60,38 @@ def safe_md(text):
     return re.sub(r'(?<!\\)\$', r'\\$', text)
 
 
+
+def detect_week_question(question):
+    """
+    Check if the question references a specific week number (e.g. 'week 4').
+    Returns the week number as an int, or None if not found.
+    """
+    import re
+    match = re.search(r'\bweek\s*(\d)\b', question, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def format_week_answer(week_data):
+    """
+    Build a deterministic markdown answer from a week_breakdown entry.
+    Never calls OpenAI.
+    """
+    lines = [
+        f"**Week {week_data['week_number']}: {week_data['week_start']} to {week_data['week_end']}**",
+        "",
+    ]
+    if week_data["shift_count"] == 0:
+        lines.append("There were no scheduled shifts this week.")
+    else:
+        lines.append(f"You worked {week_data['shift_count']} shift{'s' if week_data['shift_count'] != 1 else ''}:")
+        for d in week_data["shift_dates"]:
+            lines.append(f"- {d}")
+        lines.append("")
+        lines.append(f"Gross income: ${week_data['gross_income']:,.2f}")
+        lines.append(f"Net income: ${week_data['net_income']:,.2f}")
+    return "\n".join(lines)
+
+
 init_db()
 
 saved_hourly_rate, saved_hours_per_shift, saved_fuel_cost = load_settings()
@@ -419,38 +451,48 @@ with tab3:
                 {"role": "user", "content": user_question}
             )
 
+            # --- Python-first: answer week questions without calling OpenAI ---
+            week_num = detect_week_question(user_question)
+            if week_num is not None:
+                week_match = next(
+                    (w for w in week_breakdown if w["week_number"] == week_num),
+                    None
+                )
+                if week_match:
+                    reply = format_week_answer(week_match)
+                else:
+                    reply = f"I could not find week {week_num} for this roster."
+                st.session_state.roster_chat.append(
+                    {"role": "assistant", "content": reply}
+                )
+                st.rerun()
+
+            # --- OpenAI for all other questions ---
             system_prompt = f"""
-You are a concise scheduling assistant.
+You are a concise scheduling assistant for a single loaded roster month: {month_name} {year}.
 
-Use only the data below. Never refer to shifts as raw day numbers alone.
+SCOPE: You only know this one month. If asked to compare months, tell the user to use the Saved Rosters chat below.
 
-Work schedule (use this as the source of truth for all dates):
+SOURCE OF TRUTH: The scheduled_days list has been human-validated. If asked about confidence or accuracy, say the source of truth is the human-validated scheduled_days, but note that the original AI image extraction may still contain errors worth reviewing.
+
+WORK SCHEDULE (individual shift details — use for ALL date lookups):
 {json.dumps(work_schedule)}
 
-Analytics:
+MONTHLY ANALYTICS (month totals only — do NOT use for week-level answers):
 {json.dumps(current_analytics)}
 
-Settings:
+SETTINGS:
 - Hourly rate: {hourly_rate}
 - Hours per shift: {hours_per_shift}
 - Fuel cost per shift: {fuel_cost}
 
-Formatting rules — always follow these:
-- Never list a shift as just a number like "day 17" or "17, 18, 19".
+FORMATTING RULES:
+- Never list shifts as raw day numbers like "17, 18, 19" or "day 17".
 - Always format shift dates as: Weekday DD Month YYYY (e.g. Monday 18 May 2026).
-- Use the weekday and date from work_schedule for every shift mentioned.
 - When listing multiple shifts, use bullet points, one per line.
-- For count questions: state the count first, then list each shift date as a bullet point.
-- Format all money as $1,234.56 (comma-separated, 2 decimal places).
-- Keep answers concise and practical.
-
-Example format for shift lists:
-You worked 5 shifts in week 4:
-- Sunday 17 May 2026
-- Monday 18 May 2026
-- Tuesday 19 May 2026
-- Wednesday 20 May 2026
-- Thursday 21 May 2026
+- For count questions: give the count first, then list each shift as a bullet point.
+- Format all money with commas and 2 decimal places (e.g. $1,088.80).
+- Keep answers concise.
 """
 
             recent_messages = st.session_state.roster_chat[-10:]
@@ -528,13 +570,11 @@ Current settings:
 - Fuel cost per shift: ${fuel_cost}
 
 Formatting rules — always follow these:
+- For comparison questions (e.g. "compare April and May"): give a concise summary per month only — total shifts, weekend shifts, gross income, net income, and a partial-roster note if fewer than 10 shifts. Do NOT list individual shift dates unless the user explicitly asks for them.
 - Never list shifts as raw day numbers like "17, 18, 19" or "day 17".
-- Always format shift dates as: Weekday DD Month YYYY (e.g. Monday 18 May 2026).
-- To build a full date, combine the day number with the month and year from the roster record.
-- When listing multiple shifts, use bullet points, one per line.
-- For count questions: state the count first, then list each shift date as a bullet point.
+- Always format shift dates as: Weekday DD Month YYYY (e.g. Monday 18 May 2026) if dates are requested.
 - Use short Markdown headings (###) for each section or month.
-- Format all money as $1,234.56 (comma-separated, 2 decimal places).
+- Format all money with commas and 2 decimal places (e.g. $1,088.80).
 - When comparing months, give each month its own heading.
 - If a month has fewer than 10 shifts, note it may be a partial roster.
 - State clearly if data is missing rather than guessing.
