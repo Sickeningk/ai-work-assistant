@@ -170,6 +170,9 @@ st.sidebar.write(f"Hourly Rate: ${hourly_rate}")
 st.sidebar.write(f"Hours Per Shift: {hours_per_shift}")
 st.sidebar.write(f"Fuel Cost Per Shift: ${fuel_cost}")
 
+st.sidebar.divider()
+show_debug = st.sidebar.checkbox("Show Developer Debug", value=False)
+
 if "roster_data" not in st.session_state:
     st.session_state.roster_data = None
 
@@ -495,19 +498,20 @@ with tab3:
         st.subheader("Ask About Current Roster")
         st.caption(f"📋 Current loaded roster: {current_roster_label}")
 
-        # Developer Debug expander (temporary — remove after diagnosis)
-        with st.expander("🛠 Developer Debug", expanded=False):
-            st.markdown(f"**Loaded roster:** {current_month_name} {current_year}")
-            st.markdown(f"**Shift count:** {len(current_scheduled_days)}")
-            st.markdown(f"**current_scheduled_days:** `{current_scheduled_days}`")
-            st.markdown("**current_week_breakdown:**")
-            st.json(current_week_breakdown)
-            wk4 = next((w for w in current_week_breakdown if w["week_number"] == 4), None)
-            if wk4:
-                st.markdown("**Week 4 entry:**")
-                st.json(wk4)
-            else:
-                st.markdown("**Week 4 entry:** not found")
+        # Developer Debug expander — shown only when sidebar checkbox is enabled
+        if show_debug:
+            with st.expander("🛠 Developer Debug", expanded=True):
+                st.markdown(f"**Loaded roster:** {current_month_name} {current_year}")
+                st.markdown(f"**Shift count:** {len(current_scheduled_days)}")
+                st.markdown(f"**current_scheduled_days:** `{current_scheduled_days}`")
+                st.markdown("**current_week_breakdown:**")
+                st.json(current_week_breakdown)
+                wk4 = next((w for w in current_week_breakdown if w["week_number"] == 4), None)
+                if wk4:
+                    st.markdown("**Week 4 entry:**")
+                    st.json(wk4)
+                else:
+                    st.markdown("**Week 4 entry:** not found")
 
         # Render chat history
         for msg in st.session_state.roster_chat:
