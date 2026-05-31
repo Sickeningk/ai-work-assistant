@@ -11,7 +11,17 @@ from database import (
     load_settings,
     save_settings,
     save_roster,
-    load_rosters_dataframe
+    load_rosters_dataframe,
+    save_weekly_roster,
+    load_weekly_rosters_dataframe,
+    load_weekly_roster_by_start,
+)
+from week_entry_utils import (
+    next_sunday,
+    week_dates,
+    day_label,
+    week_label,
+    weekly_summary,
 )
 
 from analytics import (
@@ -324,7 +334,11 @@ if "active_roster_key" not in st.session_state:
 if "casual_pay_settings" not in st.session_state:
     st.session_state.casual_pay_settings = {}
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+if "weekly_entry" not in st.session_state:
+    st.session_state.weekly_entry = {}  # stores last saved weekly roster in session
+
+tab_we, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "🗓 Weekly Entry",
     "📅 Current Roster",
     "📊 Analytics",
     "🤖 AI Assistant",
@@ -333,6 +347,140 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📥 Export",
     "💰 Casual Pay Estimator"
 ])
+
+
+# ---------------------------------------------------------------------------
+# Tab: Weekly Entry
+# ---------------------------------------------------------------------------
+with tab_we:
+
+    import datetime as _dt
+
+    st.header("🗓 Weekly Roster Entry")
+    st.caption(
+        "Enter your Amazon shifts for the coming week. "
+        "Your work week runs **Sunday to Saturday**. "
+        "Use this every Friday when your roster drops."
+    )
+
+    # --- Week selector ---
+    st.subheader("Select week")
+
+    _default_sunday = next_sunday(_dt.date.today())
+
+    _we_week_start = st.date_input(
+        "Week starting (Sunday)",
+        value=_default_sunday,
+        key="we_week_start",
+        help="Defaults to the next upcoming Sunday. You can pick a different week.",
+    )
+
+    # Enforce Sunday — if user picks a non-Sunday, warn and nudge
+    if _we_week_start.weekday() != 6:
+        st.warning(
+            f"⚠️ {_we_week_start.strftime('%A %-d %b')} is not a Sunday. "
+            "Please select a Sunday as the week start."
+        )
+    else:
+        _we_week_end = _we_week_start + _dt.timedelta(days=6)
+        _we_all_dates = week_dates(_we_week_start)
+
+        st.markdown(f"**Week:** {week_label(_we_week_start)}")
+
+        # --- Check if a saved roster exists for this week ---
+        _existing = load_weekly_roster_by_start(_we_week_start.isoformat())
+        _existing_dates = set(_existing["scheduled_dates"]) if _existing else set()
+
+        st.divider()
+        st.subheader("Select your shifts")
+        st.caption("Tick each day you are working. Dates are shown next to each day.")
+
+        _selected_dates = []
+        _cols = st.columns(7)
+        _day_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+        for i, _d in enumerate(_we_all_dates):
+            _iso = _d.isoformat()
+            _label = day_label(_d)          # e.g. "Sunday 7 Jun"
+            _default_checked = _iso in _existing_dates
+            _checked = _cols[i].checkbox(
+                _label,
+                value=_default_checked,
+                key=f"we_day_{_iso}",
+            )
+            if _checked:
+                _selected_dates.append(_d)
+
+        st.divider()
+
+        # --- Weekly summary ---
+        st.subheader("Weekly summary")
+
+        if not _selected_dates:
+            st.info("No shifts selected yet. Tick the days above to see your estimate.")
+        else:
+            _summary = weekly_summary(
+                _selected_dates,
+                hourly_rate,
+                hours_per_shift,
+                fuel_cost,
+            )
+
+            _s_col1, _s_col2, _s_col3, _s_col4 = st.columns(4)
+            _s_col1.metric("Total Shifts",    _summary["total_shifts"])
+            _s_col2.metric("Weekend Shifts",  _summary["weekend_shifts"])
+            _s_col3.metric("Gross Income",    f"${_summary['gross_income']:,.2f}")
+            _s_col4.metric("After-Fuel",      f"${_summary['after_fuel_income']:,.2f}")
+
+            _s_col5, _s_col6 = st.columns(2)
+            _s_col5.metric("Gross / Shift",     f"${_summary['per_shift_gross']:,.2f}")
+            _s_col6.metric("After-Fuel / Shift", f"${_summary['per_shift_after_fuel']:,.2f}")
+
+            st.caption(
+                f"Based on: \\${hourly_rate}/hr × {hours_per_shift} hrs/shift, "
+                f"\\${fuel_cost} fuel/shift. "
+                "This is an estimate only — rates may vary by day type."
+            )
+
+            # Shift date list
+            with st.expander("Selected shift dates"):
+                for _sd in _selected_dates:
+                    st.write(f"- {_sd.strftime('%A %-d %B %Y')}")
+
+            st.divider()
+
+            # --- Save button ---
+            if _existing:
+                st.caption(
+                    f"⚠️ A roster for this week is already saved "
+                    f"(saved {_existing['created_at']}). Saving again will overwrite it."
+                )
+
+            if st.button("💾 Save Weekly Roster", key="we_save_btn"):
+                _iso_dates = [d.isoformat() for d in _selected_dates]
+                save_weekly_roster(
+                    week_start_date=_we_week_start.isoformat(),
+                    week_end_date=_we_week_end.isoformat(),
+                    scheduled_dates=_iso_dates,
+                    source="manual",
+                )
+                st.session_state.weekly_entry = {
+                    "week_start": _we_week_start.isoformat(),
+                    "week_end":   _we_week_end.isoformat(),
+                    "dates":      _iso_dates,
+                    "summary":    _summary,
+                }
+                st.success(
+                    f"✅ Saved {_summary['total_shifts']} shifts for "
+                    f"{week_label(_we_week_start)}."
+                )
+                st.rerun()
+
+    st.divider()
+    st.caption(
+        "💡 **Tip:** Come back every Friday when your Amazon roster drops "
+        "and tick your shifts for the coming week."
+    )
 
 
 with tab1:
