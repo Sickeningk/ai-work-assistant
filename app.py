@@ -23,10 +23,14 @@ from ai_helpers import analyze_roster_image
 from time_utils import get_next_shift, get_days_until, get_today, build_week_breakdown
 from calendar_view import render_calendar
 from export_utils import build_export_dataframe
-from payslip_utils import (
-    effective_tax_rate, effective_net_rate, estimate_tax_for_gross,
-    estimate_takehome, estimate_takehome_after_fuel,
-    per_shift_takehome, reconciliation_check
+from pay_rate_utils import (
+    classify_days,
+    shift_gross,
+    shift_after_fuel,
+    roster_gross,
+    roster_after_fuel,
+    skip_cost,
+    compare_shift_types,
 )
 from forecasting import (
     gross_per_shift,
@@ -317,8 +321,8 @@ if "saved_chat" not in st.session_state:
 if "active_roster_key" not in st.session_state:
     st.session_state.active_roster_key = None
 
-if "payslip_data" not in st.session_state:
-    st.session_state.payslip_data = {}
+if "casual_pay_settings" not in st.session_state:
+    st.session_state.casual_pay_settings = {}
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📅 Current Roster",
@@ -327,7 +331,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📚 History",
     "📈 Forecasting",
     "📥 Export",
-    "💰 Take-Home Estimator"
+    "💰 Casual Pay Estimator"
 ])
 
 
@@ -1144,126 +1148,259 @@ with tab6:
 
 with tab7:
 
-    st.header("💰 Take-Home Estimator")
-    st.caption("Estimates your after-tax income using values from your own payslip. This is an estimate only and not tax advice.")
-
-    st.info(
-        "🔒 **Privacy reminder:** Before uploading any payslip image in a future version, "
-        "redact your **TFN, bank details, address, employee ID, super member number, and any QR/barcode**."
+    st.header("💰 Casual Pay Estimator")
+    st.caption(
+        "Estimate your gross income based on your actual pay rate, shift hours, fuel cost, "
+        "and day-type multipliers. **Rates are estimates.** "
+        "Check Fair Work, your award, enterprise agreement, or payslip for exact rates."
     )
 
-    st.subheader("Step 1 — Enter Your Payslip Values")
-    st.caption("Enter values from one recent payslip. Leave optional fields at 0 if not applicable.")
+    st.divider()
+    st.subheader("Step 1 — Pay Rate Settings")
+    st.caption(
+        "Defaults come from your sidebar settings. "
+        "Adjust multipliers to match your actual award, EBA, or employer rate."
+    )
 
-    col1, col2 = st.columns(2)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        cpe_base_rate = st.number_input(
+            "Base hourly rate ($)",
+            min_value=0.0,
+            value=float(hourly_rate),
+            step=0.25,
+            key="cpe_base_rate",
+            help="Your ordinary-time hourly rate. Defaults to your sidebar setting."
+        )
+        cpe_hours = st.number_input(
+            "Hours per shift",
+            min_value=0.0,
+            value=float(hours_per_shift),
+            step=0.25,
+            key="cpe_hours",
+            help="Paid hours per shift. Defaults to your sidebar setting."
+        )
+        cpe_fuel = st.number_input(
+            "Fuel cost per shift ($)",
+            min_value=0.0,
+            value=float(fuel_cost),
+            step=0.50,
+            key="cpe_fuel",
+            help="Out-of-pocket fuel cost per shift. Defaults to your sidebar setting."
+        )
+        cpe_allowance = st.number_input(
+            "Allowance per shift ($ optional)",
+            min_value=0.0,
+            value=0.0,
+            step=0.50,
+            key="cpe_allowance",
+            help="Any flat allowance paid per shift (e.g. tool allowance, meal allowance). Leave at 0 if none."
+        )
 
-    with col1:
-        ps_gross = st.number_input("Gross Pay ($)", min_value=0.0, value=st.session_state.payslip_data.get("gross", 0.0), step=10.0, key="ps_gross")
-        ps_tax = st.number_input("Tax Withheld ($)", min_value=0.0, value=st.session_state.payslip_data.get("tax", 0.0), step=10.0, key="ps_tax")
-        ps_net = st.number_input("Net Pay ($)", min_value=0.0, value=st.session_state.payslip_data.get("net", 0.0), step=10.0, key="ps_net")
+    with col_b:
+        st.markdown("**Day-type multipliers**")
+        st.caption(
+            "Set to 1.0 if you are unsure. "
+            "Do not apply penalty rates unless your award, EBA, or payslip confirms them."
+        )
+        cpe_weekday_mult = st.number_input(
+            "Weekday multiplier",
+            min_value=0.0,
+            value=1.0,
+            step=0.05,
+            key="cpe_weekday_mult"
+        )
+        cpe_sat_mult = st.number_input(
+            "Saturday multiplier",
+            min_value=0.0,
+            value=1.0,
+            step=0.05,
+            key="cpe_sat_mult"
+        )
+        cpe_sun_mult = st.number_input(
+            "Sunday multiplier",
+            min_value=0.0,
+            value=1.0,
+            step=0.05,
+            key="cpe_sun_mult"
+        )
+        cpe_ph_mult = st.number_input(
+            "Public holiday multiplier",
+            min_value=0.0,
+            value=2.5,
+            step=0.05,
+            key="cpe_ph_mult",
+            help="Only applied to shifts you manually mark as public holidays below."
+        )
+        cpe_ot_mult = st.number_input(
+            "Overtime multiplier (reference only)",
+            min_value=0.0,
+            value=1.5,
+            step=0.05,
+            key="cpe_ot_mult",
+            help="Not applied automatically — shown in the comparison table for reference."
+        )
 
-    with col2:
-        ps_hours = st.number_input("Hours Worked (this payslip)", min_value=0.0, value=st.session_state.payslip_data.get("hours", 0.0), step=0.5, key="ps_hours")
-        ps_deductions = st.number_input("Other Deductions ($, optional)", min_value=0.0, value=st.session_state.payslip_data.get("deductions", 0.0), step=1.0, key="ps_deductions")
-        ps_allowances = st.number_input("Allowances ($, optional)", min_value=0.0, value=st.session_state.payslip_data.get("allowances", 0.0), step=1.0, key="ps_allowances")
+    st.divider()
+    st.subheader("Step 2 — Per-Shift Estimates")
 
-    ps_super = st.number_input("Super / Employer Contributions ($, optional)", min_value=0.0, value=st.session_state.payslip_data.get("super", 0.0), step=1.0, key="ps_super")
+    wd_gross = shift_gross(cpe_base_rate, cpe_hours, cpe_weekday_mult, cpe_allowance)
+    wd_af    = shift_after_fuel(cpe_base_rate, cpe_hours, cpe_weekday_mult, cpe_allowance, cpe_fuel)
+    sat_gross = shift_gross(cpe_base_rate, cpe_hours, cpe_sat_mult, cpe_allowance)
+    sat_af    = shift_after_fuel(cpe_base_rate, cpe_hours, cpe_sat_mult, cpe_allowance, cpe_fuel)
+    sun_gross = shift_gross(cpe_base_rate, cpe_hours, cpe_sun_mult, cpe_allowance)
+    sun_af    = shift_after_fuel(cpe_base_rate, cpe_hours, cpe_sun_mult, cpe_allowance, cpe_fuel)
+    ph_gross  = shift_gross(cpe_base_rate, cpe_hours, cpe_ph_mult, cpe_allowance)
+    ph_af     = shift_after_fuel(cpe_base_rate, cpe_hours, cpe_ph_mult, cpe_allowance, cpe_fuel)
+    ot_gross  = shift_gross(cpe_base_rate, cpe_hours, cpe_ot_mult, cpe_allowance)
+    ot_af     = shift_after_fuel(cpe_base_rate, cpe_hours, cpe_ot_mult, cpe_allowance, cpe_fuel)
 
-    if st.button("Save Payslip Values"):
-        st.session_state.payslip_data = {
-            "gross": ps_gross,
-            "tax": ps_tax,
-            "net": ps_net,
-            "hours": ps_hours,
-            "deductions": ps_deductions,
-            "allowances": ps_allowances,
-            "super": ps_super,
-        }
-        st.success("Payslip values saved for this session.")
-        st.rerun()
+    cpe_table_rows = compare_shift_types(
+        cpe_base_rate, cpe_hours, cpe_fuel,
+        weekday_mult=cpe_weekday_mult,
+        saturday_mult=cpe_sat_mult,
+        sunday_mult=cpe_sun_mult,
+        ph_mult=cpe_ph_mult,
+        allowance=cpe_allowance,
+    )
+    # Append overtime row for reference
+    cpe_table_rows.append({
+        "Shift Type": "Overtime (ref)",
+        "Multiplier": f"{cpe_ot_mult:.2f}x",
+        "Effective Rate ($/hr)": f"${cpe_base_rate * cpe_ot_mult:.2f}",
+        "Gross / Shift": f"${ot_gross:,.2f}",
+        "After Fuel / Shift": f"${ot_af:,.2f}",
+    })
 
-    pd_data = st.session_state.payslip_data
+    st.dataframe(pd.DataFrame(cpe_table_rows), use_container_width=True, hide_index=True)
 
-    if not pd_data or pd_data.get("gross", 0) == 0:
-        st.info("Enter your payslip values above and click Save to see estimates.")
+    st.divider()
+    st.subheader("Step 3 — Roster Summary")
+
+    if st.session_state.roster_data:
+        _rd = st.session_state.roster_data
+        _month = _rd["month"]
+        _year  = int(_rd["year"])
+        _days  = list(_rd["scheduled_days"])
+
+        _classified = classify_days(_days, _month, _year)
+        _wd_days  = _classified["weekday"]
+        _sat_days = _classified["saturday"]
+        _sun_days = _classified["sunday"]
+
+        _wd_count  = len(_wd_days)
+        _sat_count = len(_sat_days)
+        _sun_count = len(_sun_days)
+
+        st.caption(
+            f"Loaded roster: **{_month} {_year}** — "
+            f"{len(_days)} total shifts: "
+            f"{_wd_count} weekday, {_sat_count} Saturday, {_sun_count} Sunday"
+        )
+        if _sat_days:
+            st.caption(f"Saturday shifts: days {sorted(_sat_days)}")
+        if _sun_days:
+            st.caption(f"Sunday shifts: days {sorted(_sun_days)}")
+
+        cpe_ph_count = st.number_input(
+            "Public holiday shifts in this roster (manual)",
+            min_value=0,
+            max_value=len(_days),
+            value=0,
+            step=1,
+            key="cpe_ph_count",
+            help="Public holidays are not auto-detected. Enter how many of your shifts fall on a public holiday."
+        )
+
+        # Adjust weekday count down by PH count (user confirms PH shifts were weekdays)
+        _wd_adj = max(0, _wd_count - cpe_ph_count)
+
+        _r_gross = roster_gross(
+            _wd_adj, _sat_count, _sun_count, cpe_ph_count,
+            cpe_base_rate, cpe_hours,
+            weekday_mult=cpe_weekday_mult,
+            saturday_mult=cpe_sat_mult,
+            sunday_mult=cpe_sun_mult,
+            ph_mult=cpe_ph_mult,
+            allowance=cpe_allowance,
+        )
+        _r_af = roster_after_fuel(
+            _wd_adj, _sat_count, _sun_count, cpe_ph_count,
+            cpe_base_rate, cpe_hours, cpe_fuel,
+            weekday_mult=cpe_weekday_mult,
+            saturday_mult=cpe_sat_mult,
+            sunday_mult=cpe_sun_mult,
+            ph_mult=cpe_ph_mult,
+            allowance=cpe_allowance,
+        )
+        _avg_per_shift = round(_r_af / len(_days), 2) if len(_days) > 0 else 0.0
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Estimated Gross", f"${_r_gross:,.2f}")
+        col2.metric("After-Fuel Gross", f"${_r_af:,.2f}")
+        col3.metric("Avg After-Fuel / Shift", f"${_avg_per_shift:,.2f}")
 
     else:
-        pg = pd_data["gross"]
-        pt = pd_data["tax"]
-        pn = pd_data["net"]
-        pd_ded = pd_data.get("deductions", 0.0)
-        pd_all = pd_data.get("allowances", 0.0)
+        st.info("No roster loaded. Load a roster in the Current Roster tab to see a roster summary here.")
+        cpe_manual_shifts = st.number_input(
+            "Number of shifts (manual estimate)",
+            min_value=1, max_value=31, value=10, step=1, key="cpe_manual_shifts"
+        )
+        cpe_ph_count = st.number_input(
+            "Public holiday shifts (manual)",
+            min_value=0, max_value=cpe_manual_shifts, value=0, step=1, key="cpe_ph_count_manual"
+        )
+        _wd_adj  = max(0, cpe_manual_shifts - cpe_ph_count)
+        _r_gross = roster_gross(
+            _wd_adj, 0, 0, cpe_ph_count,
+            cpe_base_rate, cpe_hours,
+            weekday_mult=cpe_weekday_mult,
+            ph_mult=cpe_ph_mult,
+            allowance=cpe_allowance,
+        )
+        _r_af = roster_after_fuel(
+            _wd_adj, 0, 0, cpe_ph_count,
+            cpe_base_rate, cpe_hours, cpe_fuel,
+            weekday_mult=cpe_weekday_mult,
+            ph_mult=cpe_ph_mult,
+            allowance=cpe_allowance,
+        )
+        _avg_per_shift = round(_r_af / cpe_manual_shifts, 2) if cpe_manual_shifts > 0 else 0.0
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Estimated Gross", f"${_r_gross:,.2f}")
+        col2.metric("After-Fuel Gross", f"${_r_af:,.2f}")
+        col3.metric("Avg After-Fuel / Shift", f"${_avg_per_shift:,.2f}")
 
-        tax_rate = effective_tax_rate(pt, pg)
-        net_rate = effective_net_rate(pn, pg)
+    st.divider()
+    st.subheader("Step 4 — Skip Cost")
+    st.caption("What you lose (in gross) if you skip one shift of a chosen type.")
 
-        st.divider()
-        st.subheader("Step 2 — Payslip Derived Rates")
-        st.caption("Estimated from your entered payslip values.")
+    cpe_skip_type = st.selectbox(
+        "Shift type to skip",
+        options=["Weekday", "Saturday", "Sunday", "Public Holiday"],
+        key="cpe_skip_type"
+    )
+    _skip_mult_map = {
+        "Weekday": cpe_weekday_mult,
+        "Saturday": cpe_sat_mult,
+        "Sunday": cpe_sun_mult,
+        "Public Holiday": cpe_ph_mult,
+    }
+    _skip_result = skip_cost(
+        cpe_base_rate, cpe_hours,
+        multiplier=_skip_mult_map[cpe_skip_type],
+        fuel_cost=cpe_fuel,
+        allowance=cpe_allowance,
+    )
 
-        if tax_rate is None:
-            st.warning("Gross pay is zero — cannot calculate rates.")
-        else:
-            col1, col2 = st.columns(2)
-            col1.metric("Effective Tax Rate", f"{tax_rate * 100:.1f}%")
-            col2.metric("Effective Net Rate", f"{net_rate * 100:.1f}%" if net_rate else "N/A")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Gross Lost", f"${_skip_result['gross_lost']:,.2f}")
+    col2.metric("Fuel Saved", f"${_skip_result['fuel_saved']:,.2f}")
+    col3.metric("Net Loss (gross − fuel)", f"${_skip_result['net_loss']:,.2f}")
 
-            # Reconciliation check
-            ok, expected, diff = reconciliation_check(pg, pt, pn, pd_ded, pd_all)
-            if not ok:
-                st.warning(
-                    f"⚠️ Reconciliation note: Based on your entries, net pay is expected to be "
-                    f"**${expected:,.2f}** but you entered **${pn:,.2f}** "
-                    f"(difference: ${diff:,.2f}). "
-                    "This may be due to unlisted deductions, rounding, or super. "
-                    "Check your payslip carefully."
-                )
-
-            st.divider()
-            st.subheader("Step 3 — Roster Take-Home Estimate")
-            st.caption("Estimated from your entered payslip values. Fuel is kept separate and is not treated as tax-deductible.")
-
-            # Use current loaded roster if available, else manual shift count
-            if st.session_state.roster_data:
-                rd = st.session_state.roster_data
-                r_shifts = len(rd["scheduled_days"])
-                r_month = rd["month"]
-                r_year = int(rd["year"])
-                r_gross = r_shifts * hourly_rate * hours_per_shift
-                st.caption(f"Using loaded roster: {r_month} {r_year} — {r_shifts} shifts")
-            else:
-                r_shifts = st.number_input("Number of shifts (no roster loaded)", min_value=1, max_value=31, value=10, step=1, key="ps_manual_shifts")
-                r_gross = r_shifts * hourly_rate * hours_per_shift
-                st.caption("No roster loaded — using manual shift count above.")
-
-            r_tax = estimate_tax_for_gross(r_gross, tax_rate)
-            r_takehome = estimate_takehome(r_gross, tax_rate)
-            r_fuel_total = fuel_cost * r_shifts
-            r_takehome_after_fuel = estimate_takehome_after_fuel(r_gross, tax_rate, fuel_cost, r_shifts)
-            r_per_shift = per_shift_takehome(r_takehome_after_fuel, r_shifts)
-
-            col1, col2 = st.columns(2)
-            col1.metric("Gross Income", f"${r_gross:,.2f}")
-            col2.metric("After-Fuel Income", f"${r_gross - r_fuel_total:,.2f}")
-
-            col3, col4 = st.columns(2)
-            col3.metric("Estimated Tax Withheld", f"${r_tax:,.2f}")
-            col4.metric("Estimated Take-Home Pay", f"${r_takehome:,.2f}")
-
-            col5, col6 = st.columns(2)
-            col5.metric("Estimated Take-Home After Fuel", f"${r_takehome_after_fuel:,.2f}")
-            col6.metric("Estimated Take-Home Per Shift", f"${r_per_shift:,.2f}" if r_per_shift else "N/A")
-
-            st.divider()
-            st.subheader("Simple vs Payslip-Based Estimate")
-            st.caption("Simple estimate uses gross minus fuel only (no tax). Payslip-based applies your entered effective tax rate.")
-
-            simple_net = r_gross - r_fuel_total
-            col1, col2 = st.columns(2)
-            col1.metric("Simple Net (no tax)", f"${simple_net:,.2f}")
-            col2.metric("Payslip-Based Take-Home After Fuel", f"${r_takehome_after_fuel:,.2f}")
-
-            tax_impact = simple_net - r_takehome_after_fuel
-            st.caption(f"Estimated tax impact: **-${tax_impact:,.2f}** compared to simple net.")
-
-            st.warning("⚠️ This is an estimate only and not tax advice. Your actual take-home may differ based on your full-year income, deductions, and ATO assessments.")
+    st.divider()
+    st.warning(
+        "⚠️ **Estimate only.** These figures are based on the values you entered above. "
+        "They do not account for tax, super, deductions, or award entitlements. "
+        "Check Fair Work, your award, enterprise agreement, or payslip for exact rates."
+    )
