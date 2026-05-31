@@ -34,6 +34,24 @@ from ai_helpers import analyze_roster_image
 from time_utils import get_next_shift, get_days_until, get_today, build_week_breakdown
 from calendar_view import render_calendar
 from export_utils import build_export_dataframe
+from payslip_calibration_utils import (
+    CATEGORIES,
+    current_period_gross,
+    adjustment_gross,
+    total_gross as pc_total_gross,
+    marginal_tax_withheld,
+    help_withheld,
+    total_withheld,
+    total_deductions,
+    total_allowances,
+    total_super,
+    calculated_net_pay,
+    reconcile as pc_reconcile,
+    effective_rates as pc_effective_rates,
+    has_adjustments,
+    adjustment_period_labels,
+    derived_hourly_rate,
+)
 from pay_rate_utils import (
     classify_days,
     shift_gross,
@@ -338,7 +356,10 @@ if "casual_pay_settings" not in st.session_state:
 if "weekly_entry" not in st.session_state:
     st.session_state.weekly_entry = {}  # stores last saved weekly roster in session
 
-tab_we, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+if "payslip_lines" not in st.session_state:
+    st.session_state.payslip_lines = []  # list of line item dicts for payslip calibration
+
+tab_we, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🗓 Weekly Entry",
     "📅 Current Roster",
     "📊 This Week",
@@ -346,7 +367,8 @@ tab_we, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📚 History",
     "📈 Forecasting",
     "📥 Export",
-    "💰 Casual Pay Estimator"
+    "💰 Casual Pay Estimator",
+    "🧾 Payslip Calibration",
 ])
 
 
@@ -1573,3 +1595,254 @@ with tab7:
         "They do not account for tax, super, deductions, or award entitlements. "
         "Check Fair Work, your award, enterprise agreement, or payslip for exact rates."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tab: Payslip Calibration
+# ---------------------------------------------------------------------------
+with tab8:
+    import datetime as _dt_ps
+    import pandas as _pd_ps
+
+    st.header("🧾 Payslip Calibration")
+    st.caption(
+        "Enter your payslip line items manually to break down earnings, tax, and HELP. "
+        "Use this to understand your effective rates and flag previous-period adjustments."
+    )
+    st.info("📋 **Manual entry only.** Payslip image/OCR upload is not available yet.")
+
+    # -----------------------------------------------------------------------
+    # Section 1 — Pay Period
+    # -----------------------------------------------------------------------
+    st.subheader("Step 1 — Pay Period")
+
+    _ps_col1, _ps_col2 = st.columns(2)
+    with _ps_col1:
+        _ps_week_start = st.date_input(
+            "Pay week start (Sunday)",
+            value=_dt_ps.date.today() - _dt_ps.timedelta(days=_dt_ps.date.today().weekday() + 1),
+            key="ps_week_start",
+        )
+    with _ps_col2:
+        _ps_week_end = st.date_input(
+            "Pay week end (Saturday)",
+            value=_ps_week_start + _dt_ps.timedelta(days=6),
+            key="ps_week_end",
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Section 2 — Line Item Entry
+    # -----------------------------------------------------------------------
+    st.subheader("Step 2 — Payslip Line Items")
+    st.caption(
+        "Add one row per line on your payslip. "
+        "Set the **Category** for each line. "
+        "Use **previous period adjustment** for any lines that belong to an earlier pay week."
+    )
+
+    # Seed with Amazon example structure if empty
+    _default_lines = [
+        {
+            "description": "Night Shift",
+            "hours": 0.0,
+            "rate": 0.0,
+            "amount": 0.0,
+            "category": "current period earning",
+            "applicable_period_ending": "",
+            "adjustment_note": "",
+        },
+    ]
+
+    if not st.session_state.payslip_lines:
+        st.session_state.payslip_lines = _default_lines.copy()
+
+    # Build editable dataframe
+    _lines_df = _pd_ps.DataFrame(st.session_state.payslip_lines)
+
+    # Ensure all expected columns exist (guard for older session states)
+    for _col, _default in [
+        ("description", ""),
+        ("hours", 0.0),
+        ("rate", 0.0),
+        ("amount", 0.0),
+        ("category", "current period earning"),
+        ("applicable_period_ending", ""),
+        ("adjustment_note", ""),
+    ]:
+        if _col not in _lines_df.columns:
+            _lines_df[_col] = _default
+
+    _edited_df = st.data_editor(
+        _lines_df,
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            "description": st.column_config.TextColumn("Description", width="large"),
+            "hours": st.column_config.NumberColumn("Hours", min_value=0.0, step=0.001, format="%.4f"),
+            "rate": st.column_config.NumberColumn("Rate ($/hr)", min_value=0.0, step=0.01, format="%.4f"),
+            "amount": st.column_config.NumberColumn("Amount ($)", min_value=0.0, step=0.01, format="%.2f"),
+            "category": st.column_config.SelectboxColumn(
+                "Category",
+                options=CATEGORIES,
+                required=True,
+            ),
+            "applicable_period_ending": st.column_config.TextColumn(
+                "Period Ending (YYYY-MM-DD)",
+                help="Fill in only for previous-period adjustment lines, e.g. 2026-05-17",
+                width="medium",
+            ),
+            "adjustment_note": st.column_config.TextColumn(
+                "Adjustment Note",
+                help="Optional note for adjustment lines, e.g. 'Double Time Super Applies'",
+                width="large",
+            ),
+        },
+        key="ps_line_editor",
+    )
+
+    _ps_col_a, _ps_col_b = st.columns([1, 4])
+    with _ps_col_a:
+        if st.button("💾 Save Line Items", key="ps_save_lines"):
+            st.session_state.payslip_lines = _edited_df.to_dict("records")
+            st.success("Line items saved.")
+            st.rerun()
+    with _ps_col_b:
+        if st.button("🗑 Clear All Lines", key="ps_clear_lines"):
+            st.session_state.payslip_lines = _default_lines.copy()
+            st.rerun()
+
+    st.divider()
+
+    # -----------------------------------------------------------------------
+    # Section 3 — Payslip Summary
+    # -----------------------------------------------------------------------
+    st.subheader("Step 3 — Payslip Summary")
+
+    _items = st.session_state.payslip_lines
+
+    # Entered net pay for reconciliation
+    _ps_entered_net = st.number_input(
+        "Entered Net Pay (from payslip, $)",
+        min_value=0.0,
+        value=0.0,
+        step=0.01,
+        format="%.2f",
+        key="ps_entered_net",
+        help="Enter the net pay figure shown on your payslip. Used for reconciliation only.",
+    )
+
+    if st.button("📊 Calculate", key="ps_calculate"):
+
+        # Derive totals
+        _cp_gross  = current_period_gross(_items)
+        _adj_gross = adjustment_gross(_items)
+        _tot_gross = pc_total_gross(_items)
+        _marg_tax  = marginal_tax_withheld(_items)
+        _help      = help_withheld(_items)
+        _tot_with  = total_withheld(_items)
+        _ded       = total_deductions(_items)
+        _allow     = total_allowances(_items)
+        _sup       = total_super(_items)
+        _calc_net  = calculated_net_pay(_items)
+        _rates     = pc_effective_rates(_items, _ps_entered_net)
+        _recon     = pc_reconcile(_items, _ps_entered_net)
+        _hr        = derived_hourly_rate(_items)
+
+        # Adjustment warning banner
+        if has_adjustments(_items):
+            _adj_labels = adjustment_period_labels(_items)
+            _adj_text = "\n".join(f"- {l}" for l in _adj_labels)
+            st.warning(
+                "⚠️ **This payslip includes previous-period adjustments.** "
+                "Current-period estimates may differ from the total shown on your payslip.\n\n"
+                + _adj_text
+            )
+
+        # --- Earnings breakdown ---
+        st.subheader("Earnings")
+        _e1, _e2, _e3 = st.columns(3)
+        _e1.metric("Current Period Gross",    f"${_cp_gross:,.2f}")
+        _e2.metric("Previous Period Adjustments", f"${_adj_gross:,.2f}")
+        _e3.metric("Total Gross Earnings",    f"${_tot_gross:,.2f}")
+
+        # --- Tax & withholding ---
+        st.subheader("Tax & Withholding")
+        _t1, _t2, _t3 = st.columns(3)
+        _t1.metric("Marginal Tax Withheld",   f"${_marg_tax:,.2f}")
+        _t2.metric("HELP Withheld",           f"${_help:,.2f}")
+        _t3.metric("Total Withheld",          f"${_tot_with:,.2f}")
+
+        # --- Other lines ---
+        if _ded > 0 or _allow > 0 or _sup > 0:
+            st.subheader("Other")
+            _o1, _o2, _o3 = st.columns(3)
+            _o1.metric("Deductions",  f"${_ded:,.2f}")
+            _o2.metric("Allowances",  f"${_allow:,.2f}")
+            _o3.metric("Super",       f"${_sup:,.2f}")
+
+        # --- Net pay ---
+        st.subheader("Net Pay")
+        _n1, _n2, _n3 = st.columns(3)
+        _n1.metric("Calculated Net Pay",  f"${_calc_net:,.2f}")
+        _n2.metric("Entered Net Pay",     f"${_ps_entered_net:,.2f}")
+        _n3.metric("Difference",          f"${_recon['difference']:,.2f}")
+
+        if not _recon["is_ok"]:
+            st.warning(
+                f"⚠️ **Reconciliation mismatch:** Calculated net pay is **${_calc_net:,.2f}** "
+                f"but your entered net pay is **${_ps_entered_net:,.2f}** "
+                f"(difference: ${_recon['difference']:,.2f}). "
+                "This may be due to unlisted deductions, rounding, or items not entered above. "
+                "Check your payslip carefully."
+            )
+        else:
+            st.success(
+                f"✅ Net pay reconciles within tolerance "
+                f"(calculated ${_calc_net:,.2f} vs entered ${_ps_entered_net:,.2f})."
+            )
+
+        # --- Effective rates ---
+        st.subheader("Effective Rates")
+        st.caption("Rates are based on total gross earnings including any adjustments.")
+
+        _r1, _r2, _r3, _r4 = st.columns(4)
+        _r1.metric(
+            "Effective Tax Rate",
+            f"{_rates['effective_tax_rate'] * 100:.2f}%" if _rates["effective_tax_rate"] is not None else "N/A",
+        )
+        _r2.metric(
+            "Effective HELP Rate",
+            f"{_rates['effective_help_rate'] * 100:.2f}%" if _rates["effective_help_rate"] is not None else "N/A",
+        )
+        _r3.metric(
+            "Combined Withholding Rate",
+            f"{_rates['effective_combined_rate'] * 100:.2f}%" if _rates["effective_combined_rate"] is not None else "N/A",
+        )
+        _r4.metric(
+            "Effective Net Rate",
+            f"{_rates['effective_net_rate'] * 100:.2f}%" if _rates["effective_net_rate"] is not None else "N/A",
+        )
+
+        # --- Derived hourly rate ---
+        if _hr is not None:
+            st.divider()
+            st.subheader("Derived Hourly Rate")
+            st.caption(
+                "Calculated from current-period earning lines only (hours × rate = amount). "
+                "Excludes previous-period adjustments."
+            )
+            st.metric("Effective Hourly Rate (current period)", f"${_hr:,.4f}/hr")
+            st.caption(
+                f"This compares to your sidebar setting of **${hourly_rate}/hr**. "
+                "You can update the sidebar if your rate has changed."
+            )
+
+        st.divider()
+        st.warning(
+            "⚠️ **This is an estimate only and not tax advice.** "
+            "Actual tax, HELP, and net pay depend on your full-year income, "
+            "ATO assessments, and individual circumstances. "
+            "Consult a registered tax agent for personalised advice."
+        )
