@@ -71,10 +71,18 @@ def detect_week_question(question):
     return int(match.group(1)) if match else None
 
 
-def format_week_answer(week_data):
+def asks_about_income(question):
+    """Return True if the question mentions income, money, or earnings."""
+    import re
+    keywords = r'\b(income|earn|gross|net|pay|paid|money|make|made|how much)\b'
+    return bool(re.search(keywords, question, re.IGNORECASE))
+
+
+def format_week_answer(week_data, include_income=False):
     """
     Build a deterministic markdown answer from a week_breakdown entry.
     Never calls OpenAI.
+    Uses \$ so dollar signs render correctly after safe_md is applied.
     """
     lines = [
         f"**Week {week_data['week_number']}: {week_data['week_start']} to {week_data['week_end']}**",
@@ -86,9 +94,10 @@ def format_week_answer(week_data):
         lines.append(f"You worked {week_data['shift_count']} shift{'s' if week_data['shift_count'] != 1 else ''}:")
         for d in week_data["shift_dates"]:
             lines.append(f"- {d}")
-        lines.append("")
-        lines.append(f"Gross income: ${week_data['gross_income']:,.2f}")
-        lines.append(f"Net income: ${week_data['net_income']:,.2f}")
+        if include_income:
+            lines.append("")
+            lines.append(f"Gross income: \\${week_data['gross_income']:,.2f}")
+            lines.append(f"Net income: \\${week_data['net_income']:,.2f}")
     return "\n".join(lines)
 
 
@@ -459,7 +468,7 @@ with tab3:
                     None
                 )
                 if week_match:
-                    reply = format_week_answer(week_match)
+                    reply = format_week_answer(week_match, include_income=asks_about_income(user_question))
                 else:
                     reply = f"I could not find week {week_num} for this roster."
                 st.session_state.roster_chat.append(
