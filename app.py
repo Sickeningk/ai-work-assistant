@@ -171,23 +171,20 @@ def detect_forecasting_question(question):
 def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift, fuel_cost, roster_label):
     """Build a deterministic forecasting answer. Never calls OpenAI."""
     gps = gross_per_shift(hourly_rate, hours_per_shift)
-    nps = net_per_shift(hourly_rate, hours_per_shift, fuel_cost)
 
     if question_type == "shifts_for_target":
         target = value
         needed = shifts_needed_for_target(target, hourly_rate, hours_per_shift, fuel_cost)
         if needed is None:
             return (
-                "⚠️ Your net per shift is zero or negative — check your settings. "
-                "Cannot calculate shifts needed."
+                "⚠️ Gross income per shift is zero — check your hourly rate and hours per shift settings."
             )
         proj = project_income(needed, hourly_rate, hours_per_shift, fuel_cost)
         lines = [
-            f"To reach **\\${target:,.2f} net**, you need **{needed} shifts**.",
+            f"To reach **\\${target:,.2f} gross**, you need **{needed} shifts**.",
             "",
-            f"- Net per shift: \\${nps:,.2f}",
+            f"- Gross per shift: \\${gps:,.2f}",
             f"- {needed} shifts gross: \\${proj['gross']:,.2f}",
-            f"- {needed} shifts net: \\${proj['net']:,.2f}",
         ]
         return "\n".join(lines)
 
@@ -197,9 +194,8 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
         lines = [
             f"If you work **{n} shift{'s' if n != 1 else ''}**:",
             "",
-            f"- Gross income: \\${proj['gross']:,.2f}",
-            f"- Net income: \\${proj['net']:,.2f}",
-            f"- Net per shift: \\${nps:,.2f}",
+            f"- Estimated gross income: \\${proj['gross']:,.2f}",
+            f"- Gross per shift: \\${gps:,.2f}",
         ]
         return "\n".join(lines)
 
@@ -208,9 +204,7 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
         lines = [
             "If you skip one shift:",
             "",
-            f"- Lost gross income: \\${skip['lost_gross']:,.2f}",
-            f"- Fuel saved: \\${skip['saved_fuel']:,.2f}",
-            f"- **Net income lost: \\${skip['lost_net']:,.2f}**",
+            f"- **Gross income lost: \\${skip['lost_gross']:,.2f}**",
         ]
         return "\n".join(lines)
 
@@ -218,9 +212,8 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
         lines = [
             "Per shift breakdown:",
             "",
-            f"- Gross per shift: \\${gps:,.2f}",
-            f"- Fuel cost: \\${fuel_cost:,.2f}",
-            f"- **Net per shift: \\${nps:,.2f}**",
+            f"- **Gross per shift: \\${gps:,.2f}**",
+            f"- Use **🧾 Payslip Calibration** to estimate take-home after tax and HELP.",
         ]
         return "\n".join(lines)
 
@@ -282,13 +275,17 @@ def format_week_answer(week_data, include_income=False, roster_label=None):
         if include_income:
             lines.append("")
             lines.append(f"- Gross income: \\${week_data['gross_income']:,.2f}")
-            lines.append(f"- Net income: \\${week_data['net_income']:,.2f}")
     return "\n".join(lines)
 
 
 init_db()
 
 saved_hourly_rate, saved_hours_per_shift, saved_fuel_cost = load_settings()
+
+# Pass A: fuel_cost removed from UI. Fixed at 0.0 so all existing function
+# signatures continue to work without modification. Pass B will clean up
+# helper signatures and the DB column when approved.
+fuel_cost = 0.0
 
 st.set_page_config(
     page_title="AI Work Assistant",
@@ -313,18 +310,11 @@ hours_per_shift = st.sidebar.number_input(
     step=0.5
 )
 
-fuel_cost = st.sidebar.number_input(
-    "Fuel Cost Per Shift ($)",
-    min_value=0.0,
-    value=float(saved_fuel_cost),
-    step=5.0
-)
-
 if st.sidebar.button("Save Settings"):
     save_settings(
         hourly_rate,
         hours_per_shift,
-        fuel_cost
+        fuel_cost   # preserves DB column; always saves 0.0 going forward
     )
 
     st.sidebar.success("Settings saved.")
@@ -332,7 +322,6 @@ if st.sidebar.button("Save Settings"):
 st.sidebar.write("Current Settings")
 st.sidebar.write(f"Hourly Rate: ${hourly_rate}")
 st.sidebar.write(f"Hours Per Shift: {hours_per_shift}")
-st.sidebar.write(f"Fuel Cost Per Shift: ${fuel_cost}")
 
 st.sidebar.divider()
 show_debug = st.sidebar.checkbox("Show Developer Debug", value=False)
@@ -449,20 +438,19 @@ with tab_we:
                 fuel_cost,
             )
 
-            _s_col1, _s_col2, _s_col3, _s_col4 = st.columns(4)
-            _s_col1.metric("Total Shifts",    _summary["total_shifts"])
-            _s_col2.metric("Weekend Shifts",  _summary["weekend_shifts"])
-            _s_col3.metric("Gross Income",    f"${_summary['gross_income']:,.2f}")
-            _s_col4.metric("After-Fuel",      f"${_summary['after_fuel_income']:,.2f}")
+            _s_col1, _s_col2, _s_col3 = st.columns(3)
+            _s_col1.metric("Total Shifts",   _summary["total_shifts"])
+            _s_col2.metric("Weekend Shifts", _summary["weekend_shifts"])
+            _s_col3.metric("Gross Income",   f"${_summary['gross_income']:,.2f}")
 
             _s_col5, _s_col6 = st.columns(2)
-            _s_col5.metric("Gross / Shift",     f"${_summary['per_shift_gross']:,.2f}")
-            _s_col6.metric("After-Fuel / Shift", f"${_summary['per_shift_after_fuel']:,.2f}")
+            _s_col5.metric("Gross / Shift",  f"${_summary['per_shift_gross']:,.2f}")
+            _s_col6.metric("Est. Shifts This Week", _summary["total_shifts"])
 
             st.caption(
-                f"Based on: \\${hourly_rate}/hr × {hours_per_shift} hrs/shift, "
-                f"\\${fuel_cost} fuel/shift. "
-                "This is an estimate only — rates may vary by day type."
+                f"Based on: \\${hourly_rate}/hr × {hours_per_shift} hrs/shift. "
+                "Gross income estimate only — does not include tax or HELP withholding. "
+                "Use **🧾 Payslip Calibration** to see estimated take-home."
             )
 
             # Shift date list
@@ -611,7 +599,6 @@ with tab1:
         col2.metric("Weekend Shifts", weekend_shifts)
         col3.metric("Avg Weekly Load", average_weekly_workload)
         col4.metric("Gross Income", f"${round(gross_income, 2)}")
-        col5.metric("Net Income", f"${round(net_income, 2)}")
 
         st.subheader("Work Calendar")
         st.markdown(
@@ -712,9 +699,9 @@ with tab2:
 
         # Metrics row 2
         _m5, _m6, _m7 = st.columns(3)
-        _m5.metric("Gross Income",      f"${_tw_summary['gross_income']:,.2f}")
-        _m6.metric("After-Fuel Income", f"${_tw_summary['after_fuel_income']:,.2f}")
-        _m7.metric("Est. Pay / Shift",  f"${_tw_summary['per_shift_after_fuel']:,.2f}")
+        _m5.metric("Gross Income",       f"${_tw_summary['gross_income']:,.2f}")
+        _m6.metric("Gross / Shift",      f"${_tw_summary['per_shift_gross']:,.2f}")
+        _m7.metric("Total Shifts",       _tw_summary["total_shifts"])
 
         # Shift list
         if _tw_dates:
@@ -931,7 +918,6 @@ MONTHLY ANALYTICS (month totals only — do NOT use for week-level answers):
 SETTINGS:
 - Hourly rate: {hourly_rate}
 - Hours per shift: {hours_per_shift}
-- Fuel cost per shift: {fuel_cost}
 
 FORMATTING RULES:
 - Never list shifts as raw day numbers like "17, 18, 19" or "day 17".
@@ -1068,7 +1054,7 @@ FORMATTING RULES:
                 ftype, fvalue = forecast_result
                 settings_label = (
                     f"Settings used: hourly rate {hourly_rate:.2f}/hr, "
-                    f"{hours_per_shift}h/shift, fuel {fuel_cost:.2f}/shift"
+                    f"{hours_per_shift}h/shift"
                 )
                 reply = format_forecasting_answer(
                     ftype, fvalue, hourly_rate, hours_per_shift, fuel_cost, settings_label
@@ -1088,7 +1074,6 @@ Saved roster data:
 Current settings:
 - Hourly rate: ${hourly_rate}
 - Hours per shift: {hours_per_shift}
-- Fuel cost per shift: ${fuel_cost}
 
 Formatting rules — always follow these:
 - For comparison questions (e.g. "compare April and May"): give a concise summary per month only — total shifts, weekend shifts, gross income, net income, and a partial-roster note if fewer than 10 shifts. Do NOT list individual shift dates unless the user explicitly asks for them.
@@ -1165,7 +1150,6 @@ with tab4:
                 f"{row['total_shifts']} shifts | "
                 f"{row['weekend_shifts']} weekend shifts | "
                 f"Gross: \\${row['gross_income']:,.2f} | "
-                f"Net: \\${row['net_income']:,.2f} | "
                 f"Saved: {row['created_at']}"
             )
 
@@ -1198,12 +1182,10 @@ with tab5:
     st.subheader("Per-Shift Breakdown")
 
     gps = gross_per_shift(hourly_rate, hours_per_shift)
-    nps = net_per_shift(hourly_rate, hours_per_shift, fuel_cost)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric("Gross Per Shift", f"${gps:,.2f}")
-    col2.metric("Fuel Cost Per Shift", f"${fuel_cost:,.2f}")
-    col3.metric("Net Per Shift", f"${nps:,.2f}")
+    col2.metric("Hours Per Shift", hours_per_shift)
 
     st.divider()
 
@@ -1219,16 +1201,14 @@ with tab5:
 
     projection = project_income(shift_count, hourly_rate, hours_per_shift, fuel_cost)
 
-    col1, col2 = st.columns(2)
-    col1.metric("Projected Gross", f"${projection['gross']:,.2f}")
-    col2.metric("Projected Net", f"${projection['net']:,.2f}")
+    st.metric("Projected Gross Income", f"${projection['gross']:,.2f}")
 
     st.divider()
 
-    st.subheader("Shifts Needed for a Target Income")
+    st.subheader("Shifts Needed for a Target Gross Income")
 
     target = st.number_input(
-        "Target net income ($)",
+        "Target gross income ($)",
         min_value=0.0,
         value=4000.0,
         step=100.0
@@ -1237,12 +1217,12 @@ with tab5:
     needed = shifts_needed_for_target(target, hourly_rate, hours_per_shift, fuel_cost)
 
     if needed is None:
-        st.warning("Net income per shift is zero or negative — check your settings.")
+        st.warning("Gross income per shift is zero — check your hourly rate and hours per shift settings.")
     else:
         st.metric("Shifts Needed", needed)
         st.caption(
-            f"At ${nps:,.2f} net per shift, "
-            f"{needed} shifts earns ${needed * nps:,.2f} net."
+            f"At \\${gps:,.2f} gross per shift, "
+            f"{needed} shifts earns \\${needed * gps:,.2f} gross."
         )
 
     st.divider()
@@ -1251,10 +1231,7 @@ with tab5:
 
     skip = cost_of_skipping_shift(hourly_rate, hours_per_shift, fuel_cost)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Gross Lost", f"${skip['lost_gross']:,.2f}")
-    col2.metric("Fuel Saved", f"${skip['saved_fuel']:,.2f}")
-    col3.metric("Net Lost", f"${skip['lost_net']:,.2f}")
+    st.metric("Gross Income Lost", f"${skip['lost_gross']:,.2f}")
 
     st.divider()
 
@@ -1334,15 +1311,15 @@ with tab6:
         st.caption(
             f"Export includes {len(export_df)} roster(s). "
             f"Settings used — hourly rate: {hourly_rate}, "
-            f"hours per shift: {hours_per_shift}, fuel per shift: {fuel_cost}."
+            f"hours per shift: {hours_per_shift}."
         )
 
 with tab7:
 
     st.header("💰 Casual Pay Estimator")
     st.caption(
-        "Estimate your gross income based on your actual pay rate, shift hours, fuel cost, "
-        "and day-type multipliers. **Rates are estimates.** "
+        "Estimate your gross income based on your actual pay rate, shift hours, "
+        "day-type multipliers, and allowances. **Rates are estimates.** "
         "Check Fair Work, your award, enterprise agreement, or payslip for exact rates."
     )
 
@@ -1371,14 +1348,8 @@ with tab7:
             key="cpe_hours",
             help="Paid hours per shift. Defaults to your sidebar setting."
         )
-        cpe_fuel = st.number_input(
-            "Fuel cost per shift ($)",
-            min_value=0.0,
-            value=float(fuel_cost),
-            step=0.50,
-            key="cpe_fuel",
-            help="Out-of-pocket fuel cost per shift. Defaults to your sidebar setting."
-        )
+        # Pass A: fuel removed from UI. Fixed at 0.0.
+        cpe_fuel = 0.0
         cpe_allowance = st.number_input(
             "Allowance per shift ($ optional)",
             min_value=0.0,
@@ -1460,8 +1431,10 @@ with tab7:
         "Multiplier": f"{cpe_ot_mult:.2f}x",
         "Effective Rate ($/hr)": f"${cpe_base_rate * cpe_ot_mult:.2f}",
         "Gross / Shift": f"${ot_gross:,.2f}",
-        "After Fuel / Shift": f"${ot_af:,.2f}",
     })
+    # Drop the "After Fuel / Shift" column — fuel removed in Pass A
+    for _r in cpe_table_rows:
+        _r.pop("After Fuel / Shift", None)
 
     st.dataframe(pd.DataFrame(cpe_table_rows), use_container_width=True, hide_index=True)
 
@@ -1528,8 +1501,8 @@ with tab7:
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Estimated Gross", f"${_r_gross:,.2f}")
-        col2.metric("After-Fuel Gross", f"${_r_af:,.2f}")
-        col3.metric("Avg After-Fuel / Shift", f"${_avg_per_shift:,.2f}")
+        col2.metric("Estimated Gross", f"${_r_af:,.2f}")
+        col3.metric("Gross / Shift", f"${_avg_per_shift:,.2f}")
 
     else:
         st.info("No roster loaded. Load a roster in the Current Roster tab to see a roster summary here.")
@@ -1559,8 +1532,8 @@ with tab7:
         _avg_per_shift = round(_r_af / cpe_manual_shifts, 2) if cpe_manual_shifts > 0 else 0.0
         col1, col2, col3 = st.columns(3)
         col1.metric("Estimated Gross", f"${_r_gross:,.2f}")
-        col2.metric("After-Fuel Gross", f"${_r_af:,.2f}")
-        col3.metric("Avg After-Fuel / Shift", f"${_avg_per_shift:,.2f}")
+        col2.metric("Estimated Gross", f"${_r_af:,.2f}")
+        col3.metric("Gross / Shift", f"${_avg_per_shift:,.2f}")
 
     st.divider()
     st.subheader("Step 4 — Skip Cost")
@@ -1584,16 +1557,14 @@ with tab7:
         allowance=cpe_allowance,
     )
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Gross Lost", f"${_skip_result['gross_lost']:,.2f}")
-    col2.metric("Fuel Saved", f"${_skip_result['fuel_saved']:,.2f}")
-    col3.metric("Net Loss (gross − fuel)", f"${_skip_result['net_loss']:,.2f}")
+    st.metric("Gross Income Lost", f"${_skip_result['gross_lost']:,.2f}")
 
     st.divider()
     st.warning(
-        "⚠️ **Estimate only.** These figures are based on the values you entered above. "
-        "They do not account for tax, super, deductions, or award entitlements. "
-        "Check Fair Work, your award, enterprise agreement, or payslip for exact rates."
+        "⚠️ **Estimates only.** Figures are gross income based on entered rate and hours. "
+        "They do not include tax, HELP, super, deductions, or award penalty rates. "
+        "Check your payslip, Fair Work, your award/enterprise agreement, "
+        "or a registered tax agent for exact figures."
     )
 
 
