@@ -181,6 +181,18 @@ def load_weekly_roster_by_start(week_start_date: str):
     }
 
 
+def clear_monthly_rosters():
+    """
+    Delete all rows from the monthly rosters table.
+    Does NOT drop the table, touch weekly_rosters, settings, or rosters.db itself.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM rosters")
+    conn.commit()
+    conn.close()
+
+
 def load_rosters_dataframe():
     import pandas as pd
 

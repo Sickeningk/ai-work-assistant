@@ -15,6 +15,7 @@ from database import (
     save_weekly_roster,
     load_weekly_rosters_dataframe,
     load_weekly_roster_by_start,
+    clear_monthly_rosters,
 )
 from week_entry_utils import (
     next_sunday,
@@ -1147,6 +1148,28 @@ with tab4:
                 f"Net: \\${row['net_income']:,.2f} | "
                 f"Saved: {row['created_at']}"
             )
+
+    # --- Danger Zone ---
+    st.divider()
+    with st.expander("⚠️ Danger Zone — Clear Legacy Monthly Rosters"):
+        st.warning(
+            "This will permanently delete **all saved monthly rosters** from the database. "
+            "Weekly Entry data and app settings will **not** be affected. "
+            "This cannot be undone."
+        )
+        _confirm_clear = st.checkbox(
+            "Yes, I want to permanently delete all saved monthly rosters",
+            key="confirm_clear_monthly",
+        )
+        _clear_btn = st.button(
+            "🗑 Delete All Monthly Rosters",
+            key="clear_monthly_btn",
+            disabled=not _confirm_clear,
+        )
+        if _clear_btn and _confirm_clear:
+            clear_monthly_rosters()
+            st.success("✅ All monthly rosters have been cleared.")
+            st.rerun()
 
 with tab5:
 
