@@ -482,9 +482,13 @@ with tab3:
         st.session_state.active_roster_key = current_roster_key
 
         st.subheader("Ask About Current Roster")
+        # Explicitly read directly from session_state to guarantee banner matches week handler
+        _banner_days = st.session_state.roster_data["scheduled_days"]
+        _banner_count = len(_banner_days)
         st.caption(
             f"📋 Current loaded roster: {month_name} {year} — "
-            f"{len(scheduled_days)} shift{'s' if len(scheduled_days) != 1 else ''}"
+            f"{_banner_count} shift{'s' if _banner_count != 1 else ''} "
+            f"(days: {_banner_days})"
         )
 
         # Developer Debug expander (temporary — remove after diagnosis)
