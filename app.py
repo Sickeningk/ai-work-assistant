@@ -78,6 +78,140 @@ def asks_about_income(question):
     return bool(re.search(keywords, question, re.IGNORECASE))
 
 
+def detect_forecasting_question(question):
+    """
+    Detect questions that can be answered deterministically by forecasting.py.
+    Returns (question_type, extracted_value) or None.
+
+    Types:
+        "shifts_for_target"  — how many shifts to reach $X net
+        "project_shifts"     — if I work N shifts, what do I earn
+        "skip_cost"          — what do I lose skipping a shift
+        "net_per_shift"      — net or gross per shift
+    """
+    import re
+
+    # Shifts needed for target income: "make $5000", "earn 5,000", "hit $3000 net"
+    target_match = re.search(
+        r'\b(make|earn|need|reach|hit|get to)\b.*?\$?([\d,]+)',
+        question, re.IGNORECASE
+    )
+    if target_match and re.search(
+        r'\b(how many shifts|shifts.*(need|take|require))\b', question, re.IGNORECASE
+    ):
+        raw = target_match.group(2).replace(",", "")
+        try:
+            return ("shifts_for_target", float(raw))
+        except ValueError:
+            pass
+
+    # Project income for N shifts: "if I work 4 shifts", "work 10 shifts"
+    proj_match = re.search(
+        r'\b(if i work|work|do)\s+(\d+)\s+shifts?\b', question, re.IGNORECASE
+    )
+    if proj_match:
+        try:
+            return ("project_shifts", int(proj_match.group(2)))
+        except ValueError:
+            pass
+
+    # Cost of skipping: "skip", "miss", "lose" + "shift"
+    if re.search(r'\b(skip|miss|not work|skip a shift|miss a shift)\b', question, re.IGNORECASE):
+        if re.search(r'\b(lose|cost|worth|income|earn|make|pay)\b', question, re.IGNORECASE):
+            return ("skip_cost", None)
+
+    # Net or gross per shift
+    if re.search(
+        r'\b(net|gross|earn|make|pay|get)\b.*\b(per shift|a shift|each shift|per day)\b',
+        question, re.IGNORECASE
+    ):
+        return ("net_per_shift", None)
+
+    return None
+
+
+def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift, fuel_cost, roster_label):
+    """Build a deterministic forecasting answer. Never calls OpenAI."""
+    gps = gross_per_shift(hourly_rate, hours_per_shift)
+    nps = net_per_shift(hourly_rate, hours_per_shift, fuel_cost)
+
+    if question_type == "shifts_for_target":
+        target = value
+        needed = shifts_needed_for_target(target, hourly_rate, hours_per_shift, fuel_cost)
+        if needed is None:
+            return (
+                "⚠️ Your net per shift is zero or negative — check your settings. "
+                "Cannot calculate shifts needed."
+            )
+        proj = project_income(needed, hourly_rate, hours_per_shift, fuel_cost)
+        lines = [
+            f"To reach **\\${target:,.2f} net**, you need **{needed} shifts**.",
+            "",
+            f"- Net per shift: \\${nps:,.2f}",
+            f"- {needed} shifts gross: \\${proj['gross']:,.2f}",
+            f"- {needed} shifts net: \\${proj['net']:,.2f}",
+            "",
+            f"*Based on: {roster_label}*",
+        ]
+        return "\n".join(lines)
+
+    if question_type == "project_shifts":
+        n = int(value)
+        proj = project_income(n, hourly_rate, hours_per_shift, fuel_cost)
+        lines = [
+            f"If you work **{n} shift{'s' if n != 1 else ''}**:",
+            "",
+            f"- Gross income: \\${proj['gross']:,.2f}",
+            f"- Net income: \\${proj['net']:,.2f}",
+            f"- Net per shift: \\${nps:,.2f}",
+            "",
+            f"*Based on: {roster_label}*",
+        ]
+        return "\n".join(lines)
+
+    if question_type == "skip_cost":
+        skip = cost_of_skipping_shift(hourly_rate, hours_per_shift, fuel_cost)
+        lines = [
+            "If you skip one shift:",
+            "",
+            f"- Lost gross income: \\${skip['lost_gross']:,.2f}",
+            f"- Fuel saved: \\${skip['saved_fuel']:,.2f}",
+            f"- **Net income lost: \\${skip['lost_net']:,.2f}**",
+            "",
+            f"*Based on: {roster_label}*",
+        ]
+        return "\n".join(lines)
+
+    if question_type == "net_per_shift":
+        lines = [
+            "Per shift breakdown:",
+            "",
+            f"- Gross per shift: \\${gps:,.2f}",
+            f"- Fuel cost: \\${fuel_cost:,.2f}",
+            f"- **Net per shift: \\${nps:,.2f}**",
+            "",
+            f"*Based on: {roster_label}*",
+        ]
+        return "\n".join(lines)
+
+    return None
+
+
+def detect_app_question(question):
+    """
+    Return True if the question is about app behavior, not roster data.
+    These questions are out of scope for Current Roster chat.
+    """
+    import re
+    app_keywords = (
+        r"\b(app|deploy|cloud|export|api.?key|secret|database|sqlite|storage|"
+        r"bug|error|button|tab|streamlit|install|setting|config|server|"
+        r"load properly|restart|reboot|disappear|reset|crash|ui|interface)\b"
+    )
+    return bool(re.search(app_keywords, question, re.IGNORECASE))
+
+
+
 def detect_saved_week_question(question):
     """
     Extract week number and month name(s) from a saved-roster question.
@@ -172,6 +306,7 @@ st.sidebar.write(f"Fuel Cost Per Shift: ${fuel_cost}")
 
 st.sidebar.divider()
 show_debug = st.sidebar.checkbox("Show Developer Debug", value=False)
+show_older_answers = st.sidebar.checkbox("Show older roster answers", value=False)
 
 if "roster_data" not in st.session_state:
     st.session_state.roster_data = None
@@ -515,16 +650,20 @@ with tab3:
 
         # Render chat history
         for msg in st.session_state.roster_chat:
+            msg_key = msg.get("roster_key")
+            is_stale = (msg_key is not None and msg_key != current_roster_key)
+            # Hide stale messages (both user and assistant) when toggle is off
+            if is_stale and not show_older_answers:
+                continue
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
                 if msg["role"] == "assistant":
-                    msg_key = msg.get("roster_key")
-                    msg_label = msg.get("roster_label", "")
                     if msg_key is None:
-                        pass  # old message without key — render silently
+                        pass  # old format — render silently
                     elif msg_key == current_roster_key:
-                        st.caption(f"✅ Based on: {msg_label}")
+                        st.caption(f"✅ Based on: {msg_label if (msg_label := msg.get('roster_label', '')) else msg_key}")
                     else:
+                        msg_label = msg.get("roster_label", msg_key)
                         st.caption(f"⚠️ Older answer — based on: {msg_label}")
 
         user_question = st.chat_input(
@@ -535,7 +674,8 @@ with tab3:
         if user_question:
 
             st.session_state.roster_chat.append(
-                {"role": "user", "content": user_question}
+                {"role": "user", "content": user_question,
+                 "roster_key": current_roster_key, "roster_label": current_roster_label}
             )
 
             # --- Python-first: answer week questions without calling OpenAI ---
@@ -575,6 +715,28 @@ with tab3:
                     )
                 else:
                     reply = f"I could not find week {week_num} for this roster."
+                st.session_state.roster_chat.append({"role": "assistant", "content": reply, "roster_key": current_roster_key, "roster_label": current_roster_label})
+                st.rerun()
+
+            # --- Python-first: forecasting questions ---
+            forecast_result = detect_forecasting_question(user_question)
+            if forecast_result is not None:
+                ftype, fvalue = forecast_result
+                reply = format_forecasting_answer(
+                    ftype, fvalue, hourly_rate, hours_per_shift, fuel_cost, current_roster_label
+                )
+                if reply:
+                    st.session_state.roster_chat.append({"role": "assistant", "content": reply, "roster_key": current_roster_key, "roster_label": current_roster_label})
+                    st.rerun()
+
+            # --- Scope check: app/system questions ---
+            if detect_app_question(user_question):
+                reply = (
+                    "This Current Roster chat only answers questions about the loaded roster "
+                    f"(**{current_roster_label}**). "
+                    "For app behavior, deployment, export, cloud storage, or API questions, "
+                    "use **App Help / Diagnostics** (coming soon) or check the sidebar settings."
+                )
                 st.session_state.roster_chat.append({"role": "assistant", "content": reply, "roster_key": current_roster_key, "roster_label": current_roster_label})
                 st.rerun()
 
