@@ -487,6 +487,20 @@ with tab3:
             f"{len(scheduled_days)} shift{'s' if len(scheduled_days) != 1 else ''}"
         )
 
+        # Developer Debug expander (temporary — remove after diagnosis)
+        with st.expander("🛠 Developer Debug", expanded=False):
+            st.markdown(f"**Loaded roster:** {month_name} {year}")
+            st.markdown(f"**Shift count:** {len(scheduled_days)}")
+            st.markdown(f"**scheduled_days from session_state:** `{scheduled_days}`")
+            st.markdown("**week_breakdown:**")
+            st.json(week_breakdown)
+            wk4 = next((w for w in week_breakdown if w["week_number"] == 4), None)
+            if wk4:
+                st.markdown("**Week 4 entry:**")
+                st.json(wk4)
+            else:
+                st.markdown("**Week 4 entry:** not found")
+
         # Render chat history
         for msg in st.session_state.roster_chat:
             with st.chat_message(msg["role"]):
@@ -544,6 +558,8 @@ with tab3:
                         include_income=asks_about_income(user_question),
                         roster_label=f"{month_name} {year}"
                     )
+                    # DEBUG tag — remove after diagnosis
+                    reply += f"\n\n*[Source: Current Roster Python handler | days used: {scheduled_days} | week_breakdown shifts: {week_match['shift_dates']}]*"
                 else:
                     reply = f"I could not find week {week_num} for this roster."
                 st.session_state.roster_chat.append(
