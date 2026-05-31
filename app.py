@@ -888,6 +888,23 @@ FORMATTING RULES:
                 )
                 st.rerun()
 
+            # --- Python-first: forecasting questions for saved rosters ---
+            forecast_result = detect_forecasting_question(database_question)
+            if forecast_result is not None:
+                ftype, fvalue = forecast_result
+                settings_label = (
+                    f"Settings used: hourly rate {hourly_rate:.2f}/hr, "
+                    f"{hours_per_shift}h/shift, fuel {fuel_cost:.2f}/shift"
+                )
+                reply = format_forecasting_answer(
+                    ftype, fvalue, hourly_rate, hours_per_shift, fuel_cost, settings_label
+                )
+                if reply:
+                    st.session_state.saved_chat.append(
+                        {"role": "assistant", "content": reply}
+                    )
+                    st.rerun()
+
             system_prompt_db = f"""
 You are a workforce analytics assistant. Answer clearly using clean Markdown.
 
