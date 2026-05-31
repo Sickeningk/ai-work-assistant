@@ -440,34 +440,45 @@ with tab3:
 
     if st.session_state.roster_data:
 
-        roster_data = st.session_state.roster_data
-
-        month_name = roster_data["month"]
-        year = int(roster_data["year"])
-        scheduled_days = roster_data["scheduled_days"]
+        # --- Explicitly named current-roster variables ---
+        # All Current Roster chat logic must use ONLY these variables.
+        # Never use saved roster database records inside this section.
+        current_roster_data = st.session_state.roster_data
+        current_month_name = current_roster_data["month"]
+        current_year = int(current_roster_data["year"])
+        current_scheduled_days = list(current_roster_data["scheduled_days"])
 
         current_analytics = calculate_analytics_from_days(
-            month_name,
-            year,
-            scheduled_days,
+            current_month_name,
+            current_year,
+            current_scheduled_days,
             hourly_rate,
             hours_per_shift,
             fuel_cost
         )
 
-        work_schedule = current_analytics["work_schedule"]
+        current_work_schedule = current_analytics["work_schedule"]
 
-        week_breakdown = build_week_breakdown(
-            month_name,
-            year,
-            scheduled_days,
+        current_week_breakdown = build_week_breakdown(
+            current_month_name,
+            current_year,
+            current_scheduled_days,
             hourly_rate,
             hours_per_shift,
             fuel_cost
+        )
+
+        # Human-readable context label attached to every answer
+        current_roster_label = (
+            f"{current_month_name} {current_year} — "
+            f"{len(current_scheduled_days)} shift{'s' if len(current_scheduled_days) != 1 else ''}"
         )
 
         # Build a unique key for the current roster using month, year, and exact days
-        current_roster_key = f"{month_name}-{year}-{','.join(str(d) for d in sorted(scheduled_days))}"
+        current_roster_key = (
+            f"{current_month_name}-{current_year}-"
+            f"{','.join(str(d) for d in sorted(current_scheduled_days))}"
+        )
 
         # Detect if the loaded roster has changed while chat history exists
         if (
@@ -482,23 +493,16 @@ with tab3:
         st.session_state.active_roster_key = current_roster_key
 
         st.subheader("Ask About Current Roster")
-        # Explicitly read directly from session_state to guarantee banner matches week handler
-        _banner_days = st.session_state.roster_data["scheduled_days"]
-        _banner_count = len(_banner_days)
-        st.caption(
-            f"📋 Current loaded roster: {month_name} {year} — "
-            f"{_banner_count} shift{'s' if _banner_count != 1 else ''} "
-            f"(days: {_banner_days})"
-        )
+        st.caption(f"📋 Current loaded roster: {current_roster_label}")
 
         # Developer Debug expander (temporary — remove after diagnosis)
         with st.expander("🛠 Developer Debug", expanded=False):
-            st.markdown(f"**Loaded roster:** {month_name} {year}")
-            st.markdown(f"**Shift count:** {len(scheduled_days)}")
-            st.markdown(f"**scheduled_days from session_state:** `{scheduled_days}`")
-            st.markdown("**week_breakdown:**")
-            st.json(week_breakdown)
-            wk4 = next((w for w in week_breakdown if w["week_number"] == 4), None)
+            st.markdown(f"**Loaded roster:** {current_month_name} {current_year}")
+            st.markdown(f"**Shift count:** {len(current_scheduled_days)}")
+            st.markdown(f"**current_scheduled_days:** `{current_scheduled_days}`")
+            st.markdown("**current_week_breakdown:**")
+            st.json(current_week_breakdown)
+            wk4 = next((w for w in current_week_breakdown if w["week_number"] == 4), None)
             if wk4:
                 st.markdown("**Week 4 entry:**")
                 st.json(wk4)
@@ -528,59 +532,50 @@ with tab3:
 
                 # Scope check: redirect if user asks about a different month
                 if len(mentioned_months) > 1:
-                    # Multiple months → redirect to Saved Rosters chat
                     reply = (
                         f"This chat only uses the currently loaded roster: "
-                        f"**{month_name} {year}**. "
+                        f"**{current_roster_label}**. "
                         f"For questions about multiple months, use the **Saved Rosters chat** below."
                     )
-                    st.session_state.roster_chat.append(
-                        {"role": "assistant", "content": reply}
-                    )
+                    st.session_state.roster_chat.append({"role": "assistant", "content": reply})
                     st.rerun()
-                elif len(mentioned_months) == 1 and mentioned_months[0].lower() != month_name.lower():
-                    # Single month that doesn't match loaded roster → redirect
+                elif len(mentioned_months) == 1 and mentioned_months[0].lower() != current_month_name.lower():
                     reply = (
                         f"This chat only uses the currently loaded roster: "
-                        f"**{month_name} {year}**. "
+                        f"**{current_roster_label}**. "
                         f"For {mentioned_months[0]} or other saved months, "
                         f"use the **Saved Rosters chat** below."
                     )
-                    st.session_state.roster_chat.append(
-                        {"role": "assistant", "content": reply}
-                    )
+                    st.session_state.roster_chat.append({"role": "assistant", "content": reply})
                     st.rerun()
 
-                # No month mentioned, or month matches loaded roster → answer normally
+                # No month mentioned, or month matches loaded roster → answer using current_week_breakdown
                 week_match = next(
-                    (w for w in week_breakdown if w["week_number"] == week_num),
+                    (w for w in current_week_breakdown if w["week_number"] == week_num),
                     None
                 )
                 if week_match:
                     reply = format_week_answer(
                         week_match,
                         include_income=asks_about_income(user_question),
-                        roster_label=f"{month_name} {year}"
+                        roster_label=f"{current_month_name} {current_year}"
                     )
-                    # DEBUG tag — remove after diagnosis
-                    reply += f"\n\n*[Source: Current Roster Python handler | days used: {scheduled_days} | week_breakdown shifts: {week_match['shift_dates']}]*"
+                    reply += f"\n\n*Based on: {current_roster_label}*"
                 else:
                     reply = f"I could not find week {week_num} for this roster."
-                st.session_state.roster_chat.append(
-                    {"role": "assistant", "content": reply}
-                )
+                st.session_state.roster_chat.append({"role": "assistant", "content": reply})
                 st.rerun()
 
             # --- OpenAI for all other questions ---
             system_prompt = f"""
-You are a concise scheduling assistant for a single loaded roster month: {month_name} {year}.
+You are a concise scheduling assistant for a single loaded roster month: {current_month_name} {current_year}.
 
 SCOPE: You only know this one month. If asked to compare months, tell the user to use the Saved Rosters chat below.
 
 SOURCE OF TRUTH: The scheduled_days list has been human-validated. If asked about confidence or accuracy, say the source of truth is the human-validated scheduled_days, but note that the original AI image extraction may still contain errors worth reviewing.
 
 WORK SCHEDULE (individual shift details — use for ALL date lookups):
-{json.dumps(work_schedule)}
+{json.dumps(current_work_schedule)}
 
 MONTHLY ANALYTICS (month totals only — do NOT use for week-level answers):
 {json.dumps(current_analytics)}
@@ -595,8 +590,9 @@ FORMATTING RULES:
 - Always format shift dates as: Weekday DD Month YYYY (e.g. Monday 18 May 2026).
 - When listing multiple shifts, use bullet points, one per line.
 - For count questions: give the count first, then list each shift as a bullet point.
-- Format all money with commas and 2 decimal places (e.g. $1,088.80).
+- Format all money with commas and 2 decimal places (e.g. \$1,088.80).
 - Keep answers concise.
+- End your answer with exactly this line: Based on: {current_roster_label}
 """
 
             recent_messages = st.session_state.roster_chat[-10:]
@@ -609,9 +605,7 @@ FORMATTING RULES:
                     ] + recent_messages
                 )
                 reply = safe_md(assistant_response.choices[0].message.content)
-                st.session_state.roster_chat.append(
-                    {"role": "assistant", "content": reply}
-                )
+                st.session_state.roster_chat.append({"role": "assistant", "content": reply})
             except Exception as e:
                 st.error(f"⚠️ AI Assistant error: {e}")
                 st.session_state.roster_chat.pop()
