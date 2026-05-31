@@ -82,7 +82,7 @@ def format_week_answer(week_data, include_income=False):
     """
     Build a deterministic markdown answer from a week_breakdown entry.
     Never calls OpenAI.
-    Uses \$ so dollar signs render correctly after safe_md is applied.
+    Uses \\$ so dollar signs render correctly after safe_md is applied.
     """
     lines = [
         f"**Week {week_data['week_number']}: {week_data['week_start']} to {week_data['week_end']}**",
@@ -96,8 +96,8 @@ def format_week_answer(week_data, include_income=False):
             lines.append(f"- {d}")
         if include_income:
             lines.append("")
-            lines.append(f"Gross income: \\${week_data['gross_income']:,.2f}")
-            lines.append(f"Net income: \\${week_data['net_income']:,.2f}")
+            lines.append(f"- Gross income: \\${week_data['gross_income']:,.2f}")
+            lines.append(f"- Net income: \\${week_data['net_income']:,.2f}")
     return "\n".join(lines)
 
 
