@@ -78,14 +78,16 @@ def asks_about_income(question):
     return bool(re.search(keywords, question, re.IGNORECASE))
 
 
-def format_week_answer(week_data, include_income=False):
+def format_week_answer(week_data, include_income=False, roster_label=None):
     """
     Build a deterministic markdown answer from a week_breakdown entry.
     Never calls OpenAI.
     Uses \\$ so dollar signs render correctly after safe_md is applied.
+    roster_label: optional string like "April 2026" shown in the header.
     """
+    label_str = f" ({roster_label})" if roster_label else ""
     lines = [
-        f"**Week {week_data['week_number']}: {week_data['week_start']} to {week_data['week_end']}**",
+        f"**Week {week_data['week_number']}{label_str}: {week_data['week_start']} to {week_data['week_end']}**",
         "",
     ]
     if week_data["shift_count"] == 0:
