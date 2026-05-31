@@ -20,7 +20,7 @@ from analytics import (
 )
 
 from ai_helpers import analyze_roster_image
-from time_utils import get_next_shift, get_days_until, get_today
+from time_utils import get_next_shift, get_days_until, get_today, build_week_breakdown
 from calendar_view import render_calendar
 from export_utils import build_export_dataframe
 from forecasting import (
@@ -50,6 +50,14 @@ def get_openai_client():
         st.stop()
     return OpenAI(api_key=key)
 
+
+
+
+def safe_md(text):
+    """Escape bare dollar signs so Streamlit does not render them as LaTeX."""
+    import re
+    # Replace $ not already preceded by a backslash
+    return re.sub(r'(?<!\\)\$', r'\\$', text)
 
 
 init_db()
@@ -384,6 +392,15 @@ with tab3:
 
         work_schedule = current_analytics["work_schedule"]
 
+        week_breakdown = build_week_breakdown(
+            month_name,
+            year,
+            scheduled_days,
+            hourly_rate,
+            hours_per_shift,
+            fuel_cost
+        )
+
         st.subheader("Ask About Current Roster")
 
         # Render chat history
@@ -445,8 +462,7 @@ You worked 5 shifts in week 4:
                         {"role": "system", "content": system_prompt}
                     ] + recent_messages
                 )
-                reply = assistant_response.choices[0].message.content
-                reply = reply.replace("$", "\\$")
+                reply = safe_md(assistant_response.choices[0].message.content)
                 st.session_state.roster_chat.append(
                     {"role": "assistant", "content": reply}
                 )
@@ -535,8 +551,7 @@ Formatting rules — always follow these:
                         {"role": "system", "content": system_prompt_db}
                     ] + recent_db_messages
                 )
-                db_reply = database_response.choices[0].message.content
-                db_reply = db_reply.replace("$", "\\$")
+                db_reply = safe_md(database_response.choices[0].message.content)
                 st.session_state.saved_chat.append(
                     {"role": "assistant", "content": db_reply}
                 )
