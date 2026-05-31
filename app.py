@@ -513,6 +513,15 @@ with tab3:
         for msg in st.session_state.roster_chat:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                if msg["role"] == "assistant":
+                    msg_key = msg.get("roster_key")
+                    msg_label = msg.get("roster_label", "")
+                    if msg_key is None:
+                        pass  # old message without key — render silently
+                    elif msg_key == current_roster_key:
+                        st.caption(f"✅ Based on: {msg_label}")
+                    else:
+                        st.caption(f"⚠️ Older answer — based on: {msg_label}")
 
         user_question = st.chat_input(
             "Ask about the currently loaded roster",
@@ -537,7 +546,7 @@ with tab3:
                         f"**{current_roster_label}**. "
                         f"For questions about multiple months, use the **Saved Rosters chat** below."
                     )
-                    st.session_state.roster_chat.append({"role": "assistant", "content": reply})
+                    st.session_state.roster_chat.append({"role": "assistant", "content": reply, "roster_key": current_roster_key, "roster_label": current_roster_label})
                     st.rerun()
                 elif len(mentioned_months) == 1 and mentioned_months[0].lower() != current_month_name.lower():
                     reply = (
@@ -546,7 +555,7 @@ with tab3:
                         f"For {mentioned_months[0]} or other saved months, "
                         f"use the **Saved Rosters chat** below."
                     )
-                    st.session_state.roster_chat.append({"role": "assistant", "content": reply})
+                    st.session_state.roster_chat.append({"role": "assistant", "content": reply, "roster_key": current_roster_key, "roster_label": current_roster_label})
                     st.rerun()
 
                 # No month mentioned, or month matches loaded roster → answer using current_week_breakdown
@@ -560,10 +569,9 @@ with tab3:
                         include_income=asks_about_income(user_question),
                         roster_label=f"{current_month_name} {current_year}"
                     )
-                    reply += f"\n\n*Based on: {current_roster_label}*"
                 else:
                     reply = f"I could not find week {week_num} for this roster."
-                st.session_state.roster_chat.append({"role": "assistant", "content": reply})
+                st.session_state.roster_chat.append({"role": "assistant", "content": reply, "roster_key": current_roster_key, "roster_label": current_roster_label})
                 st.rerun()
 
             # --- OpenAI for all other questions ---
@@ -590,12 +598,14 @@ FORMATTING RULES:
 - Always format shift dates as: Weekday DD Month YYYY (e.g. Monday 18 May 2026).
 - When listing multiple shifts, use bullet points, one per line.
 - For count questions: give the count first, then list each shift as a bullet point.
-- Format all money with commas and 2 decimal places (e.g. \$1,088.80).
+- Format all money with commas and 2 decimal places (e.g. \\$1,088.80).
 - Keep answers concise.
-- End your answer with exactly this line: Based on: {current_roster_label}
 """
 
-            recent_messages = st.session_state.roster_chat[-10:]
+            recent_messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in st.session_state.roster_chat[-10:]
+            ]
 
             try:
                 assistant_response = get_openai_client().chat.completions.create(
@@ -605,7 +615,7 @@ FORMATTING RULES:
                     ] + recent_messages
                 )
                 reply = safe_md(assistant_response.choices[0].message.content)
-                st.session_state.roster_chat.append({"role": "assistant", "content": reply})
+                st.session_state.roster_chat.append({"role": "assistant", "content": reply, "roster_key": current_roster_key, "roster_label": current_roster_label})
             except Exception as e:
                 st.error(f"⚠️ AI Assistant error: {e}")
                 st.session_state.roster_chat.pop()
