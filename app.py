@@ -78,6 +78,25 @@ def asks_about_income(question):
     return bool(re.search(keywords, question, re.IGNORECASE))
 
 
+def detect_saved_week_question(question):
+    """
+    Extract week number and month name(s) from a saved-roster question.
+    Returns (week_num: int | None, months: list[str])
+    Months are returned as full names e.g. ["April", "May"].
+    """
+    import re
+    MONTHS = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    ]
+    week_match = re.search(r'\bweek\s*(\d)\b', question, re.IGNORECASE)
+    week_num = int(week_match.group(1)) if week_match else None
+
+    found_months = [m for m in MONTHS if re.search(r'\b' + m + r'\b', question, re.IGNORECASE)]
+    return week_num, found_months
+
+
+
 def format_week_answer(week_data, include_income=False, roster_label=None):
     """
     Build a deterministic markdown answer from a week_breakdown entry.
@@ -594,6 +613,62 @@ FORMATTING RULES:
             st.session_state.saved_chat.append(
                 {"role": "user", "content": database_question}
             )
+
+            # --- Python-first: handle week questions for saved rosters ---
+            saved_week_num, saved_months = detect_saved_week_question(database_question)
+            if saved_week_num is not None:
+                if not saved_months:
+                    # No month specified — ask for clarification
+                    clarification = (
+                        "Which month and year do you mean? "
+                        "For example: *'week 4 of April'* or *'April week 4'*."
+                    )
+                    st.session_state.saved_chat.append(
+                        {"role": "assistant", "content": clarification}
+                    )
+                    st.rerun()
+
+                # Month(s) specified — answer in Python for each
+                include_inc = asks_about_income(database_question)
+                week_replies = []
+                for month in saved_months:
+                    # Find matching saved roster(s) for this month
+                    matching_rows = [
+                        row for _, row in raw_df.iterrows()
+                        if row["month"].lower() == month.lower()
+                    ]
+                    if not matching_rows:
+                        week_replies.append(
+                            f"I could not find a saved roster for {month.capitalize()}."
+                        )
+                        continue
+                    for row in matching_rows:
+                        import json as _json
+                        row_days = _json.loads(row["scheduled_days"])
+                        row_year = int(row["year"])
+                        wb = build_week_breakdown(
+                            row["month"], row_year, row_days,
+                            hourly_rate, hours_per_shift, fuel_cost
+                        )
+                        wk = next((w for w in wb if w["week_number"] == saved_week_num), None)
+                        if wk:
+                            week_replies.append(
+                                format_week_answer(
+                                    wk,
+                                    include_income=include_inc,
+                                    roster_label=f"{row['month']} {row_year}"
+                                )
+                            )
+                        else:
+                            week_replies.append(
+                                f"I could not find week {saved_week_num} "
+                                f"for the saved {row['month']} {row_year} roster."
+                            )
+                combined_reply = "\n\n---\n\n".join(week_replies)
+                st.session_state.saved_chat.append(
+                    {"role": "assistant", "content": combined_reply}
+                )
+                st.rerun()
 
             system_prompt_db = f"""
 You are a workforce analytics assistant. Answer clearly using clean Markdown.
