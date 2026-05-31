@@ -722,66 +722,6 @@ with tab2:
             _fig_tw.tight_layout()
             st.pyplot(_fig_tw)
 
-    # -----------------------------------------------------------------------
-    # Section B — Previous Roster History (collapsed, legacy monthly data)
-    # -----------------------------------------------------------------------
-    st.divider()
-    with st.expander("📂 Previous Roster History", expanded=False):
-        st.caption("Monthly rosters saved via image upload or manual entry.")
-
-        _hist_raw = load_rosters_dataframe()
-
-        if _hist_raw.empty:
-            st.write("No monthly roster history.")
-        else:
-            _hist_df = pd.DataFrame(
-                enrich_saved_rosters(_hist_raw, hourly_rate, hours_per_shift, fuel_cost)
-            )
-
-            _h_total = len(_hist_df)
-            _h_shifts = int(_hist_df["total_shifts"].sum())
-            _h_gross = _hist_df["gross_income"].sum()
-            _h_net = _hist_df["net_income"].sum()
-            _h_avg = _hist_df["gross_income"].mean()
-            _h_best = _hist_df.sort_values("total_shifts", ascending=False).iloc[0]
-
-            _hc1, _hc2, _hc3, _hc4 = st.columns(4)
-            _hc1.metric("Rosters Saved", _h_total)
-            _hc2.metric("Total Shifts",  _h_shifts)
-            _hc3.metric("Total Gross",   f"${_h_gross:,.2f}")
-            _hc4.metric("Total Net",     f"${_h_net:,.2f}")
-
-            st.caption(
-                f"Average monthly income: \\${_h_avg:,.2f} · "
-                f"Best month: {_h_best['month']} {_h_best['year']} "
-                f"({_h_best['total_shifts']} shifts)"
-            )
-
-            _hist_df["label"] = _hist_df["month"] + " " + _hist_df["year"].astype(str)
-
-            _fh1, _ah1 = plt.subplots(figsize=(10, 3))
-            _ah1.bar(_hist_df["label"], _hist_df["total_shifts"])
-            _ah1.set_title("Shifts by Month")
-            _ah1.set_ylabel("Shifts")
-            _ah1.tick_params(axis="x", rotation=45)
-            _fh1.tight_layout()
-            st.pyplot(_fh1)
-
-            _fh2, _ah2 = plt.subplots(figsize=(10, 3))
-            _ah2.bar(_hist_df["label"], _hist_df["gross_income"])
-            _ah2.set_title("Gross Income by Month")
-            _ah2.set_ylabel("Income ($)")
-            _ah2.tick_params(axis="x", rotation=45)
-            _fh2.tight_layout()
-            st.pyplot(_fh2)
-
-            _fh3, _ah3 = plt.subplots(figsize=(10, 3))
-            _ah3.bar(_hist_df["label"], _hist_df["net_income"])
-            _ah3.set_title("Net Income by Month")
-            _ah3.set_ylabel("Income ($)")
-            _ah3.tick_params(axis="x", rotation=45)
-            _fh3.tight_layout()
-            st.pyplot(_fh3)
 
 
 with tab3:
