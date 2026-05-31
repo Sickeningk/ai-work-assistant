@@ -23,6 +23,11 @@ from ai_helpers import analyze_roster_image
 from time_utils import get_next_shift, get_days_until, get_today, build_week_breakdown
 from calendar_view import render_calendar
 from export_utils import build_export_dataframe
+from payslip_utils import (
+    effective_tax_rate, effective_net_rate, estimate_tax_for_gross,
+    estimate_takehome, estimate_takehome_after_fuel,
+    per_shift_takehome, reconciliation_check
+)
 from forecasting import (
     gross_per_shift,
     net_per_shift,
@@ -312,13 +317,17 @@ if "saved_chat" not in st.session_state:
 if "active_roster_key" not in st.session_state:
     st.session_state.active_roster_key = None
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+if "payslip_data" not in st.session_state:
+    st.session_state.payslip_data = {}
+
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📅 Current Roster",
     "📊 Analytics",
     "🤖 AI Assistant",
     "📚 History",
     "📈 Forecasting",
-    "📥 Export"
+    "📥 Export",
+    "💰 Take-Home Estimator"
 ])
 
 
@@ -1132,3 +1141,129 @@ with tab6:
             f"Settings used — hourly rate: {hourly_rate}, "
             f"hours per shift: {hours_per_shift}, fuel per shift: {fuel_cost}."
         )
+
+with tab7:
+
+    st.header("💰 Take-Home Estimator")
+    st.caption("Estimates your after-tax income using values from your own payslip. This is an estimate only and not tax advice.")
+
+    st.info(
+        "🔒 **Privacy reminder:** Before uploading any payslip image in a future version, "
+        "redact your **TFN, bank details, address, employee ID, super member number, and any QR/barcode**."
+    )
+
+    st.subheader("Step 1 — Enter Your Payslip Values")
+    st.caption("Enter values from one recent payslip. Leave optional fields at 0 if not applicable.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        ps_gross = st.number_input("Gross Pay ($)", min_value=0.0, value=st.session_state.payslip_data.get("gross", 0.0), step=10.0, key="ps_gross")
+        ps_tax = st.number_input("Tax Withheld ($)", min_value=0.0, value=st.session_state.payslip_data.get("tax", 0.0), step=10.0, key="ps_tax")
+        ps_net = st.number_input("Net Pay ($)", min_value=0.0, value=st.session_state.payslip_data.get("net", 0.0), step=10.0, key="ps_net")
+
+    with col2:
+        ps_hours = st.number_input("Hours Worked (this payslip)", min_value=0.0, value=st.session_state.payslip_data.get("hours", 0.0), step=0.5, key="ps_hours")
+        ps_deductions = st.number_input("Other Deductions ($, optional)", min_value=0.0, value=st.session_state.payslip_data.get("deductions", 0.0), step=1.0, key="ps_deductions")
+        ps_allowances = st.number_input("Allowances ($, optional)", min_value=0.0, value=st.session_state.payslip_data.get("allowances", 0.0), step=1.0, key="ps_allowances")
+
+    ps_super = st.number_input("Super / Employer Contributions ($, optional)", min_value=0.0, value=st.session_state.payslip_data.get("super", 0.0), step=1.0, key="ps_super")
+
+    if st.button("Save Payslip Values"):
+        st.session_state.payslip_data = {
+            "gross": ps_gross,
+            "tax": ps_tax,
+            "net": ps_net,
+            "hours": ps_hours,
+            "deductions": ps_deductions,
+            "allowances": ps_allowances,
+            "super": ps_super,
+        }
+        st.success("Payslip values saved for this session.")
+        st.rerun()
+
+    pd_data = st.session_state.payslip_data
+
+    if not pd_data or pd_data.get("gross", 0) == 0:
+        st.info("Enter your payslip values above and click Save to see estimates.")
+
+    else:
+        pg = pd_data["gross"]
+        pt = pd_data["tax"]
+        pn = pd_data["net"]
+        pd_ded = pd_data.get("deductions", 0.0)
+        pd_all = pd_data.get("allowances", 0.0)
+
+        tax_rate = effective_tax_rate(pt, pg)
+        net_rate = effective_net_rate(pn, pg)
+
+        st.divider()
+        st.subheader("Step 2 — Payslip Derived Rates")
+        st.caption("Estimated from your entered payslip values.")
+
+        if tax_rate is None:
+            st.warning("Gross pay is zero — cannot calculate rates.")
+        else:
+            col1, col2 = st.columns(2)
+            col1.metric("Effective Tax Rate", f"{tax_rate * 100:.1f}%")
+            col2.metric("Effective Net Rate", f"{net_rate * 100:.1f}%" if net_rate else "N/A")
+
+            # Reconciliation check
+            ok, expected, diff = reconciliation_check(pg, pt, pn, pd_ded, pd_all)
+            if not ok:
+                st.warning(
+                    f"⚠️ Reconciliation note: Based on your entries, net pay is expected to be "
+                    f"**${expected:,.2f}** but you entered **${pn:,.2f}** "
+                    f"(difference: ${diff:,.2f}). "
+                    "This may be due to unlisted deductions, rounding, or super. "
+                    "Check your payslip carefully."
+                )
+
+            st.divider()
+            st.subheader("Step 3 — Roster Take-Home Estimate")
+            st.caption("Estimated from your entered payslip values. Fuel is kept separate and is not treated as tax-deductible.")
+
+            # Use current loaded roster if available, else manual shift count
+            if st.session_state.roster_data:
+                rd = st.session_state.roster_data
+                r_shifts = len(rd["scheduled_days"])
+                r_month = rd["month"]
+                r_year = int(rd["year"])
+                r_gross = r_shifts * hourly_rate * hours_per_shift
+                st.caption(f"Using loaded roster: {r_month} {r_year} — {r_shifts} shifts")
+            else:
+                r_shifts = st.number_input("Number of shifts (no roster loaded)", min_value=1, max_value=31, value=10, step=1, key="ps_manual_shifts")
+                r_gross = r_shifts * hourly_rate * hours_per_shift
+                st.caption("No roster loaded — using manual shift count above.")
+
+            r_tax = estimate_tax_for_gross(r_gross, tax_rate)
+            r_takehome = estimate_takehome(r_gross, tax_rate)
+            r_fuel_total = fuel_cost * r_shifts
+            r_takehome_after_fuel = estimate_takehome_after_fuel(r_gross, tax_rate, fuel_cost, r_shifts)
+            r_per_shift = per_shift_takehome(r_takehome_after_fuel, r_shifts)
+
+            col1, col2 = st.columns(2)
+            col1.metric("Gross Income", f"${r_gross:,.2f}")
+            col2.metric("After-Fuel Income", f"${r_gross - r_fuel_total:,.2f}")
+
+            col3, col4 = st.columns(2)
+            col3.metric("Estimated Tax Withheld", f"${r_tax:,.2f}")
+            col4.metric("Estimated Take-Home Pay", f"${r_takehome:,.2f}")
+
+            col5, col6 = st.columns(2)
+            col5.metric("Estimated Take-Home After Fuel", f"${r_takehome_after_fuel:,.2f}")
+            col6.metric("Estimated Take-Home Per Shift", f"${r_per_shift:,.2f}" if r_per_shift else "N/A")
+
+            st.divider()
+            st.subheader("Simple vs Payslip-Based Estimate")
+            st.caption("Simple estimate uses gross minus fuel only (no tax). Payslip-based applies your entered effective tax rate.")
+
+            simple_net = r_gross - r_fuel_total
+            col1, col2 = st.columns(2)
+            col1.metric("Simple Net (no tax)", f"${simple_net:,.2f}")
+            col2.metric("Payslip-Based Take-Home After Fuel", f"${r_takehome_after_fuel:,.2f}")
+
+            tax_impact = simple_net - r_takehome_after_fuel
+            st.caption(f"Estimated tax impact: **-${tax_impact:,.2f}** compared to simple net.")
+
+            st.warning("⚠️ This is an estimate only and not tax advice. Your actual take-home may differ based on your full-year income, deductions, and ATO assessments.")
