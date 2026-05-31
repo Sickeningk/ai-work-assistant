@@ -23,6 +23,7 @@ from week_entry_utils import (
     day_label,
     week_label,
     weekly_summary,
+    parse_shift_input,
 )
 
 from analytics import (
@@ -234,6 +235,301 @@ def detect_app_question(question):
     return bool(re.search(app_keywords, question, re.IGNORECASE))
 
 
+# ---------------------------------------------------------------------------
+# Weekly Assistant — deterministic question detection and formatting
+# ---------------------------------------------------------------------------
+
+# Shared day-token map (Sun=0 … Sat=6 within a Sun-Sat week)
+_WA_DAY_TOKENS = {
+    "sunday": 0, "monday": 1, "tuesday": 2, "wednesday": 3,
+    "thursday": 4, "friday": 5, "saturday": 6,
+    "sun": 0, "mon": 1, "tue": 2, "tues": 2, "wed": 3, "weds": 3,
+    "thu": 4, "thur": 4, "thurs": 4, "fri": 5, "sat": 6,
+}
+
+
+def detect_wa_question(question: str, week_dates_list: list):
+    """
+    Detect Weekly Assistant specific questions before sending to OpenAI.
+
+    Returns (type, value) or None.
+      "skip_day"           — value: date object
+      "add_day"            — value: date object
+      "shifts_for_takehome"— value: float target $
+      "shifts_for_gross"   — value: float target $
+      "projected_payslip"  — value: None
+      "can_afford"         — value: float amount $
+    """
+    import re
+    q = question.lower().strip()
+
+    # --- Skip a day -------------------------------------------------------
+    skip_m = re.search(r'\bskip\s+(\w+)', q)
+    if skip_m:
+        tok = skip_m.group(1)
+        if tok in _WA_DAY_TOKENS:
+            return ("skip_day", week_dates_list[_WA_DAY_TOKENS[tok]])
+
+    # --- Add / work a day -------------------------------------------------
+    for _pat in [
+        r'\badd\s+(\w+)',
+        r'\bif\s+i\s+(?:add|work|do)\s+(\w+)',
+        r'\bwhat\s+if\s+i\s+(?:add|work)\s+(\w+)',
+        r'\binclude\s+(\w+)',
+    ]:
+        _m = re.search(_pat, q)
+        if _m:
+            tok = _m.group(1)
+            if tok in _WA_DAY_TOKENS:
+                return ("add_day", week_dates_list[_WA_DAY_TOKENS[tok]])
+
+    # --- Shifts for take-home target --------------------------------------
+    # Must mention take-home / net / after tax AND a dollar amount
+    if re.search(r'\b(take.?home|net pay|after.?tax|after tax)\b', q):
+        if re.search(r'\b(how many|shifts|need)\b', q):
+            money_m = re.search(r'\$?([\d,]+)', q)
+            if money_m:
+                try:
+                    val = float(money_m.group(1).replace(",", ""))
+                    if val > 0:
+                        return ("shifts_for_takehome", val)
+                except ValueError:
+                    pass
+
+    # --- Shifts for gross target ------------------------------------------
+    # "how many shifts to make $X" / "shifts needed for $X" (no take-home mention)
+    if re.search(r'\b(how many shifts|shifts.*(need|take|required?))\b', q):
+        money_m = re.search(r'\$?([\d,]+)', q)
+        if money_m:
+            try:
+                val = float(money_m.group(1).replace(",", ""))
+                if val > 0:
+                    return ("shifts_for_gross", val)
+            except ValueError:
+                pass
+
+    # --- Projected payslip ------------------------------------------------
+    if re.search(r'\b(payslip|pay slip|pay breakdown|breakdown|projected pay)\b', q):
+        return ("projected_payslip", None)
+
+    # --- Can I afford X ---------------------------------------------------
+    afford_m = re.search(r'\bafford\b.*?\$?([\d,]+)', q)
+    if not afford_m:
+        afford_m = re.search(r'\$?([\d,]+).*\bafford\b', q)
+    if afford_m:
+        try:
+            val = float(afford_m.group(1).replace(",", ""))
+            if val > 0:
+                return ("can_afford", val)
+        except ValueError:
+            pass
+
+    return None
+
+
+def format_wa_answer(
+    q_type: str,
+    value,
+    selected_dates: list,
+    hourly_rate: float,
+    hours_per_shift: float,
+    pc_rates: dict | None,
+    week_label_str: str,
+) -> str | None:
+    """
+    Build a fully deterministic answer for a Weekly Assistant question.
+    Never calls OpenAI. All money is Python-calculated.
+    """
+    from math import ceil
+
+    def _sum(dates):
+        return weekly_summary(dates, hourly_rate, hours_per_shift, 0.0)
+
+    def _gps():
+        return round(hourly_rate * hours_per_shift, 2)
+
+    net_rate      = (pc_rates or {}).get("effective_net_rate")
+    combined_rate = (pc_rates or {}).get("effective_combined_rate")
+
+    # Refuse to calculate if no context
+    no_shifts_msg = (
+        "No shifts are entered for this week yet — "
+        "type your shifts in the box above first."
+    )
+
+    # ------------------------------------------------------------------
+    if q_type == "skip_day":
+        day = value
+        day_str = day.strftime("%A %-d %b")
+        if not selected_dates:
+            return no_shifts_msg
+        if day not in selected_dates:
+            return f"You don't have a shift on **{day_str}** this week, so there's nothing to skip."
+        new_dates = [d for d in selected_dates if d != day]
+        old_s = _sum(selected_dates)
+        new_s = _sum(new_dates) if new_dates else {
+            "total_shifts": 0, "total_hours": 0.0, "gross_income": 0.0
+        }
+        lines = [
+            f"If you skip **{day_str}**:",
+            "",
+            f"- Shifts: {new_s['total_shifts']} (was {old_s['total_shifts']})",
+            f"- Total hours: {new_s.get('total_hours', 0.0):.1f} h "
+            f"(was {old_s.get('total_hours', 0.0):.1f} h)",
+            f"- Gross: \\${new_s['gross_income']:,.2f} (was \\${old_s['gross_income']:,.2f})",
+            f"- Gross lost: \\${_gps():,.2f}",
+        ]
+        if net_rate:
+            old_net = round(old_s["gross_income"] * net_rate, 2)
+            new_net = round(new_s["gross_income"] * net_rate, 2)
+            lines.append(
+                f"- Est. take-home: \\${new_net:,.2f} (was \\${old_net:,.2f})"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    if q_type == "add_day":
+        day = value
+        day_str = day.strftime("%A %-d %b")
+        if day in selected_dates:
+            return f"You're already working **{day_str}** this week."
+        new_dates = sorted(selected_dates + [day])
+        old_s = _sum(selected_dates) if selected_dates else {
+            "total_shifts": 0, "total_hours": 0.0, "gross_income": 0.0
+        }
+        new_s = _sum(new_dates)
+        lines = [
+            f"If you add **{day_str}**:",
+            "",
+            f"- Shifts: {new_s['total_shifts']} (was {old_s['total_shifts']})",
+            f"- Total hours: {new_s.get('total_hours', 0.0):.1f} h "
+            f"(was {old_s.get('total_hours', 0.0):.1f} h)",
+            f"- Gross: \\${new_s['gross_income']:,.2f} (was \\${old_s['gross_income']:,.2f})",
+            f"- Extra gross: \\${_gps():,.2f}",
+        ]
+        if net_rate:
+            old_net = round(old_s["gross_income"] * net_rate, 2)
+            new_net = round(new_s["gross_income"] * net_rate, 2)
+            lines.append(
+                f"- Est. take-home: \\${new_net:,.2f} (was \\${old_net:,.2f})"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    if q_type == "shifts_for_takehome":
+        target = value
+        gps = _gps()
+        if not net_rate or net_rate <= 0:
+            n = ceil(target / gps) if gps > 0 else None
+            if n is None:
+                return "⚠️ Gross per shift is zero — check your hourly rate and hours per shift settings."
+            proj_gross = round(n * gps, 2)
+            return (
+                f"No payslip calibration found — can't estimate take-home directly.\n\n"
+                f"To earn \\${target:,.2f} **gross** (closest proxy), "
+                f"you need **{n} shifts** (≈ \\${proj_gross:,.2f} gross).\n\n"
+                "Add your payslip in **🧾 Payslip Calibration** "
+                "to calculate shifts needed for a take-home target."
+            )
+        net_per_shift = round(gps * net_rate, 2)
+        if net_per_shift <= 0:
+            return "⚠️ Net per shift is zero — check your settings and payslip calibration."
+        n = ceil(target / net_per_shift)
+        proj_gross = round(n * gps, 2)
+        proj_net   = round(n * net_per_shift, 2)
+        return (
+            f"To take home **\\${target:,.2f}**, you need **{n} shifts**.\n\n"
+            f"- Gross per shift: \\${gps:,.2f}\n"
+            f"- Est. take-home per shift: \\${net_per_shift:,.2f} "
+            f"(net rate {net_rate*100:.1f}%)\n"
+            f"- {n} shifts → gross \\${proj_gross:,.2f} → est. take-home \\${proj_net:,.2f}\n\n"
+            "*Based on Payslip Calibration effective net rate.*"
+        )
+
+    # ------------------------------------------------------------------
+    if q_type == "shifts_for_gross":
+        target = value
+        gps = _gps()
+        if gps <= 0:
+            return "⚠️ Gross per shift is zero — check your hourly rate and hours per shift settings."
+        n = ceil(target / gps)
+        proj_gross = round(n * gps, 2)
+        lines = [
+            f"To earn **\\${target:,.2f} gross**, you need **{n} shifts**.",
+            "",
+            f"- Gross per shift: \\${gps:,.2f}",
+            f"- {n} shifts → \\${proj_gross:,.2f} gross",
+        ]
+        if net_rate:
+            proj_net = round(proj_gross * net_rate, 2)
+            lines.append(f"- Est. take-home: \\${proj_net:,.2f}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    if q_type == "projected_payslip":
+        if not selected_dates:
+            return no_shifts_msg
+        s = _sum(selected_dates)
+        gross = s["gross_income"]
+        lines = [
+            f"**Projected payslip — {week_label_str}**",
+            "",
+            f"| Line | Amount |",
+            f"|---|---:|",
+            f"| Gross ({s['total_shifts']} shifts × {hours_per_shift} h @ \\${hourly_rate}/hr) "
+            f"| \\${gross:,.2f} |",
+        ]
+        if combined_rate is not None and combined_rate > 0:
+            withheld = round(gross * combined_rate, 2)
+            lines.append(
+                f"| Est. tax & HELP withheld ({combined_rate*100:.1f}%) "
+                f"| −\\${withheld:,.2f} |"
+            )
+        if net_rate is not None and net_rate > 0:
+            net = round(gross * net_rate, 2)
+            lines.append(f"| **Est. take-home** | **\\${net:,.2f}** |")
+        lines.append("")
+        if not net_rate:
+            lines.append(
+                "⚠️ No payslip calibration — gross only. "
+                "Add your payslip in **🧾 Payslip Calibration** for tax/HELP estimates."
+            )
+        else:
+            lines.append(
+                "*Estimates only. Based on Payslip Calibration effective rates. "
+                "Not tax advice.*"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    if q_type == "can_afford":
+        amount = value
+        if not selected_dates:
+            return no_shifts_msg
+        s = _sum(selected_dates)
+        gross = s["gross_income"]
+        if net_rate and net_rate > 0:
+            income       = round(gross * net_rate, 2)
+            income_label = "estimated take-home"
+        else:
+            income       = gross
+            income_label = "estimated gross (no payslip calibration)"
+        if income >= amount:
+            left = round(income - amount, 2)
+            return (
+                f"Your {income_label} this week is **\\${income:,.2f}**. "
+                f"\\${amount:,.2f} would leave you **\\${left:,.2f}**. ✅"
+            )
+        else:
+            short = round(amount - income, 2)
+            return (
+                f"Your {income_label} this week is **\\${income:,.2f}**. "
+                f"\\${amount:,.2f} would put you **\\${short:,.2f} short**. ⚠️"
+            )
+
+    return None
+
+
 
 def detect_saved_week_question(question):
     """
@@ -324,6 +620,7 @@ st.sidebar.write(f"Hourly Rate: ${hourly_rate}")
 st.sidebar.write(f"Hours Per Shift: {hours_per_shift}")
 
 st.sidebar.divider()
+show_legacy = st.sidebar.checkbox("Show Advanced / Legacy Tools", value=False)
 show_debug = st.sidebar.checkbox("Show Developer Debug", value=False)
 show_older_answers = st.sidebar.checkbox("Show older roster answers", value=False)
 
@@ -348,23 +645,387 @@ if "weekly_entry" not in st.session_state:
 if "payslip_lines" not in st.session_state:
     st.session_state.payslip_lines = []  # list of line item dicts for payslip calibration
 
-tab_we, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "🗓 Weekly Entry",
-    "📅 Current Roster",
-    "📊 This Week",
-    "🤖 AI Assistant",
-    "📚 History",
-    "📈 Forecasting",
-    "📥 Export",
-    "💰 Casual Pay Estimator",
-    "🧾 Payslip Calibration",
-])
+if "weekly_assistant_chat" not in st.session_state:
+    st.session_state.weekly_assistant_chat = []
+
+if "weekly_assistant_week_key" not in st.session_state:
+    st.session_state.weekly_assistant_week_key = None
+
+# Stores the last NL text that was parsed (for checkbox-sync detection)
+if "wa_last_nl_parsed" not in st.session_state:
+    st.session_state.wa_last_nl_parsed = ""
+
+# Stores the last week key seen (for detecting week change)
+if "wa_last_week_key" not in st.session_state:
+    st.session_state.wa_last_week_key = None
+
+# Entered net pay from Payslip Calibration — used to compute take-home rate
+if "wa_entered_net" not in st.session_state:
+    st.session_state.wa_entered_net = 0.0
+
+# ---------------------------------------------------------------------------
+# Tab layout — 3 main tabs always visible; legacy tools shown when toggled
+# ---------------------------------------------------------------------------
+if show_legacy:
+    tab_wa, tab_tw, tab_pc, tab_we, tab1, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "🗓 Weekly Assistant",
+        "📊 This Week",
+        "🧾 Payslip Calibration",
+        "🗓 Weekly Entry",
+        "📅 Current Roster",
+        "🤖 AI Assistant",
+        "📚 History",
+        "📈 Forecasting",
+        "📥 Export",
+        "💰 Casual Pay Estimator",
+    ])
+else:
+    tab_wa, tab_tw, tab_pc = st.tabs([
+        "🗓 Weekly Assistant",
+        "📊 This Week",
+        "🧾 Payslip Calibration",
+    ])
 
 
 # ---------------------------------------------------------------------------
-# Tab: Weekly Entry
+# Tab: Weekly Assistant (main)
 # ---------------------------------------------------------------------------
-with tab_we:
+with tab_wa:
+    import datetime as _dt_wa
+
+    st.header("🗓 Weekly Assistant")
+
+    # ── Week selector ──────────────────────────────────────────────────────
+    _wa_col_left, _wa_col_right = st.columns([2, 5])
+    with _wa_col_left:
+        _wa_default_sunday = next_sunday(_dt_wa.date.today())
+        _wa_week_start = st.date_input(
+            "Week starting (Sunday)",
+            value=_wa_default_sunday,
+            key="wa_week_start",
+        )
+
+    if _wa_week_start.weekday() != 6:
+        st.warning(
+            f"⚠️ {_wa_week_start.strftime('%A %-d %b')} is not a Sunday. "
+            "Please select a Sunday as the week start."
+        )
+    else:
+        _wa_week_end  = _wa_week_start + _dt_wa.timedelta(days=6)
+        _wa_all_dates = week_dates(_wa_week_start)
+        _wa_week_key  = _wa_week_start.isoformat()
+
+        # ── Detect week change → reset NL sync state ──────────────────────
+        if st.session_state.wa_last_week_key != _wa_week_key:
+            st.session_state.wa_last_nl_parsed = ""
+            for _d in _wa_all_dates:
+                _k = f"wa_day_{_d.isoformat()}"
+                if _k in st.session_state:
+                    del st.session_state[_k]
+            if (
+                st.session_state.weekly_assistant_week_key is not None
+                and st.session_state.weekly_assistant_week_key != _wa_week_key
+                and st.session_state.weekly_assistant_chat
+            ):
+                st.warning(
+                    "⚠️ Week changed. Earlier chat messages refer to a different week."
+                )
+            st.session_state.wa_last_week_key = _wa_week_key
+        st.session_state.weekly_assistant_week_key = _wa_week_key
+
+        # ── Load saved roster for this week ───────────────────────────────
+        _wa_existing      = load_weekly_roster_by_start(_wa_week_key)
+        _wa_existing_isos = set(_wa_existing["scheduled_dates"]) if _wa_existing else set()
+
+        # ── Conversational prompt ─────────────────────────────────────────
+        st.markdown(
+            f"#### What shifts did Amazon give you for the week starting "
+            f"**{_wa_week_start.strftime('Sunday %-d %b')}**?"
+        )
+
+        _wa_nl = st.text_input(
+            "shifts_input",
+            placeholder="Mon Tue Fri  ·  Monday to Friday  ·  No shifts this week",
+            key="wa_nl_input",
+            label_visibility="collapsed",
+        )
+
+        # ── Sync checkboxes when NL input changes ─────────────────────────
+        if _wa_nl != st.session_state.wa_last_nl_parsed:
+            if _wa_nl.strip():
+                _wa_p      = parse_shift_input(_wa_nl, _wa_all_dates)
+                _wa_p_isos = {d.isoformat() for d in _wa_p["selected_dates"]}
+                _wa_p_no   = _wa_p["no_shifts"]
+                if _wa_p["unrecognised"]:
+                    st.warning(
+                        f"⚠️ Unrecognised: {', '.join(_wa_p['unrecognised'])}"
+                    )
+                for _d in _wa_all_dates:
+                    st.session_state[f"wa_day_{_d.isoformat()}"] = (
+                        False if _wa_p_no else (_d.isoformat() in _wa_p_isos)
+                    )
+            else:
+                # NL cleared — restore from saved roster
+                for _d in _wa_all_dates:
+                    st.session_state[f"wa_day_{_d.isoformat()}"] = (
+                        _d.isoformat() in _wa_existing_isos
+                    )
+            st.session_state.wa_last_nl_parsed = _wa_nl
+
+        # ── Fine-tune expander with checkboxes ────────────────────────────
+        with st.expander("Fine-tune shifts", expanded=False):
+            st.caption("Tick to adjust individual days. Overrides the text input above.")
+            _wa_selected = []
+            _wa_chk_cols = st.columns(7)
+            for _i, _d in enumerate(_wa_all_dates):
+                _iso     = _d.isoformat()
+                _default = st.session_state.get(f"wa_day_{_iso}", _iso in _wa_existing_isos)
+                _checked = _wa_chk_cols[_i].checkbox(
+                    day_label(_d), value=_default, key=f"wa_day_{_iso}"
+                )
+                if _checked:
+                    _wa_selected.append(_d)
+
+        # ── Payslip calibration rates ─────────────────────────────────────
+        _wa_pc_items    = st.session_state.payslip_lines
+        _wa_pc_gross    = pc_total_gross(_wa_pc_items) if _wa_pc_items else 0.0
+        _wa_entered_net = st.session_state.wa_entered_net  # set by Payslip Calibration tab
+
+        # Full rates (including take-home): requires entered_net > 0
+        _wa_pc_rates = (
+            pc_effective_rates(_wa_pc_items, _wa_entered_net)
+            if _wa_pc_items and _wa_pc_gross > 0 and _wa_entered_net > 0
+            else None
+        )
+        # Tax/HELP-only rates: valid even without entered_net
+        _wa_pc_tax_rates = (
+            pc_effective_rates(_wa_pc_items, 0.0)
+            if _wa_pc_items and _wa_pc_gross > 0
+            else None
+        )
+
+        # ── Summary card ──────────────────────────────────────────────────
+        if not _wa_selected:
+            if not _wa_nl.strip() and not _wa_existing_isos:
+                st.caption(
+                    "Type your shifts above — e.g. **Mon Tue Fri** or **Monday to Friday** — "
+                    "to see your weekly summary."
+                )
+            else:
+                st.info("No shifts this week.")
+        else:
+            _wa_sum = weekly_summary(_wa_selected, hourly_rate, hours_per_shift, fuel_cost)
+
+            st.divider()
+            st.markdown("**Your week at a glance**")
+
+            # Shift date list
+            _wa_date_str = "  ·  ".join(
+                d.strftime("%a %-d %b") for d in sorted(_wa_selected)
+            )
+            st.markdown(f"📅 {_wa_date_str}")
+            st.caption(
+                f"Week: **{_wa_week_start.strftime('%-d %b')}** — "
+                f"**{_wa_week_end.strftime('%-d %b %Y')}**"
+            )
+
+            # Metrics row
+            # Defensive fallback for total_hours in case of stale bytecode
+            _wa_total_hours = _wa_sum.get(
+                "total_hours",
+                round(_wa_sum["total_shifts"] * hours_per_shift, 2)
+            )
+            _wm1, _wm2, _wm3, _wm4 = st.columns(4)
+            _wm1.metric("Shifts",       _wa_sum["total_shifts"])
+            _wm2.metric("Total Hours",  f"{_wa_total_hours:.1f} h")
+            _wm3.metric("Gross (est.)", f"${_wa_sum['gross_income']:,.2f}")
+
+            # Take-home / withheld
+            if _wa_pc_rates and _wa_pc_rates.get("effective_net_rate"):
+                _wa_net_rate = _wa_pc_rates["effective_net_rate"]
+                _wa_net_est  = round(_wa_sum["gross_income"] * _wa_net_rate, 2)
+                _wa_withheld = round(_wa_sum["gross_income"] - _wa_net_est, 2)
+                _wm4.metric("Est. Take-Home", f"${_wa_net_est:,.2f}")
+                st.caption(
+                    f"Tax & HELP withheld (est.): −\\${_wa_withheld:,.2f}  ·  "
+                    f"Net rate: {_wa_net_rate*100:.1f}%  ·  "
+                    "Recalibrate after each payslip."
+                )
+            elif _wa_pc_tax_rates and _wa_pc_tax_rates.get("effective_combined_rate"):
+                _wa_cr        = _wa_pc_tax_rates["effective_combined_rate"]
+                _wa_w_est     = round(_wa_sum["gross_income"] * _wa_cr, 2)
+                _wm4.metric("Est. Withheld", f"−${_wa_w_est:,.2f}")
+                st.caption(
+                    f"Tax & HELP withheld (est.): −\\${_wa_w_est:,.2f} ({_wa_cr*100:.1f}%)  ·  "
+                    "Enter your net pay in **🧾 Payslip Calibration → Calculate** "
+                    "to unlock take-home estimate."
+                )
+            else:
+                st.caption(
+                    "Add your payslip in **🧾 Payslip Calibration** "
+                    "to estimate tax/HELP and take-home pay."
+                )
+
+            # Save button
+            if _wa_existing:
+                st.caption(
+                    f"⚠️ Roster already saved ({_wa_existing['created_at']}). "
+                    "Saving will overwrite."
+                )
+            if st.button("💾 Save Weekly Roster", key="wa_save_btn"):
+                _iso_list = [d.isoformat() for d in _wa_selected]
+                save_weekly_roster(
+                    week_start_date=_wa_week_key,
+                    week_end_date=_wa_week_end.isoformat(),
+                    scheduled_dates=_iso_list,
+                    source="manual",
+                )
+                st.session_state.weekly_entry = {
+                    "week_start": _wa_week_key,
+                    "week_end":   _wa_week_end.isoformat(),
+                    "dates":      _iso_list,
+                    "summary":    _wa_sum,
+                }
+                st.success(
+                    f"✅ Saved {_wa_sum['total_shifts']} shifts "
+                    f"for {week_label(_wa_week_start)}."
+                )
+                st.rerun()
+
+        st.divider()
+
+        # ── Weekly chat ───────────────────────────────────────────────────
+        st.subheader("Ask about this week")
+        st.caption(
+            "Skip a shift  ·  Add a shift  ·  Projected payslip  ·  Income goals  ·  Savings"
+        )
+
+        for _msg in st.session_state.weekly_assistant_chat:
+            with st.chat_message(_msg["role"]):
+                st.markdown(_msg["content"])
+
+        _wa_q = st.chat_input(
+            "e.g.  What if I skip Tuesday?  ·  How many shifts for $1,000 take-home?",
+            key="wa_chat_input",
+        )
+
+        if _wa_q:
+            st.session_state.weekly_assistant_chat.append(
+                {"role": "user", "content": _wa_q}
+            )
+
+            # Context: current checkboxes → fall back to saved roster
+            _wa_ctx_dates = _wa_selected or [
+                _dt_wa.date.fromisoformat(d) for d in sorted(_wa_existing_isos)
+            ]
+            _wa_ctx_sum = (
+                weekly_summary(_wa_ctx_dates, hourly_rate, hours_per_shift, fuel_cost)
+                if _wa_ctx_dates else None
+            )
+
+            # ── Deterministic routing: WA-specific questions ───────────────
+            _wa_det = detect_wa_question(_wa_q, _wa_all_dates)
+            if _wa_det is not None:
+                _wa_det_type, _wa_det_val = _wa_det
+                _wa_det_reply = format_wa_answer(
+                    _wa_det_type, _wa_det_val,
+                    _wa_ctx_dates,
+                    hourly_rate, hours_per_shift,
+                    _wa_pc_rates,
+                    week_label(_wa_week_start),
+                )
+                if _wa_det_reply is not None:
+                    st.session_state.weekly_assistant_chat.append(
+                        {"role": "assistant", "content": _wa_det_reply}
+                    )
+                    st.rerun()
+
+            # ── Deterministic routing: gross forecasting fallback ──────────
+            _wa_fc = detect_forecasting_question(_wa_q)
+            if _wa_fc is not None:
+                _ftype, _fval = _wa_fc
+                _wa_fc_reply = format_forecasting_answer(
+                    _ftype, _fval, hourly_rate, hours_per_shift, fuel_cost,
+                    week_label(_wa_week_start)
+                )
+                if _wa_fc_reply:
+                    st.session_state.weekly_assistant_chat.append(
+                        {"role": "assistant", "content": _wa_fc_reply}
+                    )
+                    st.rerun()
+
+            # ── OpenAI fallback ────────────────────────────────────────────
+            _wa_sys = (
+                "You are a helpful personal work assistant for an Amazon casual warehouse worker.\n"
+                f"Week: {week_label(_wa_week_start)}\n"
+                f"Settings: ${hourly_rate}/hr, {hours_per_shift} hrs/shift.\n"
+            )
+            if _wa_ctx_sum:
+                _wa_sys += (
+                    f"Shifts: {_wa_ctx_sum['total_shifts']} "
+                    f"({_wa_ctx_sum['weekend_shifts']} weekend), "
+                    f"{_wa_ctx_sum.get('total_hours', round(_wa_ctx_sum['total_shifts'] * hours_per_shift, 2)):.1f} h total\n"
+                    f"Dates: {[d.strftime('%A %-d %b') for d in sorted(_wa_ctx_dates)]}\n"
+                    f"Gross (est.): ${_wa_ctx_sum['gross_income']:,.2f}\n"
+                )
+            else:
+                _wa_sys += "No shifts entered for this week.\n"
+
+            if _wa_pc_rates and _wa_ctx_sum and _wa_pc_rates.get("effective_net_rate"):
+                _r = _wa_pc_rates["effective_net_rate"]
+                _wa_sys += (
+                    f"Payslip net rate: {_r*100:.1f}%\n"
+                    f"Est. take-home: "
+                    f"${round(_wa_ctx_sum['gross_income'] * _r, 2):,.2f}\n"
+                )
+            elif _wa_pc_tax_rates and _wa_pc_tax_rates.get("effective_combined_rate"):
+                _cr = _wa_pc_tax_rates["effective_combined_rate"]
+                _wa_sys += (
+                    f"Est. tax & HELP rate: {_cr*100:.1f}% "
+                    "(take-home not calibrated)\n"
+                )
+            else:
+                _wa_sys += "No payslip calibration available.\n"
+
+            _wa_sys += (
+                "\nCritical rules:\n"
+                "- NEVER calculate shifts, dates, gross pay, tax, HELP, or take-home yourself.\n"
+                "- If asked about pay/shifts/income, say the summary above shows the numbers "
+                "or ask the user to enter shifts first.\n"
+                "- Keep answers short and practical.\n"
+                "- Format money as \\$X,XXX.XX."
+            )
+
+            try:
+                _wa_resp = get_openai_client().chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[{"role": "system", "content": _wa_sys}]
+                    + [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state.weekly_assistant_chat[-10:]
+                    ],
+                )
+                _wa_reply = safe_md(_wa_resp.choices[0].message.content)
+                st.session_state.weekly_assistant_chat.append(
+                    {"role": "assistant", "content": _wa_reply}
+                )
+            except Exception as _e:
+                st.error(f"⚠️ AI error: {_e}")
+                st.session_state.weekly_assistant_chat.pop()
+
+            st.rerun()
+
+        if st.session_state.weekly_assistant_chat:
+            if st.button("Clear chat", key="wa_clear_chat"):
+                st.session_state.weekly_assistant_chat = []
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Tab: Weekly Entry (legacy — visible when Show Advanced / Legacy Tools is ON)
+# ---------------------------------------------------------------------------
+if show_legacy:
+ with tab_we:
 
     import datetime as _dt
 
@@ -494,7 +1155,8 @@ with tab_we:
     )
 
 
-with tab1:
+if show_legacy:
+ with tab1:
 
     st.header("Current Roster")
 
@@ -641,7 +1303,7 @@ with tab1:
         st.info("Upload a roster screenshot to begin.")
 
 
-with tab2:
+with tab_tw:
 
     st.header("📊 This Week")
 
@@ -733,7 +1395,8 @@ with tab2:
 
 
 
-with tab3:
+if show_legacy:
+ with tab3:
 
     st.header("AI Assistant")
 
@@ -1113,7 +1776,8 @@ Formatting rules — always follow these:
                 st.rerun()
 
 
-with tab4:
+if show_legacy:
+ with tab4:
 
     st.header("Saved Rosters")
     st.info(
@@ -1175,7 +1839,8 @@ with tab4:
             st.success("✅ All monthly rosters have been cleared.")
             st.rerun()
 
-with tab5:
+if show_legacy:
+ with tab5:
 
     st.header("Forecasting & Goal Planning")
 
@@ -1274,7 +1939,8 @@ with tab5:
                 st.caption(f"⚠️ Excluded as partial: {names}")
 
 
-with tab6:
+if show_legacy:
+ with tab6:
 
     st.header("Export Roster Data")
 
@@ -1314,7 +1980,8 @@ with tab6:
             f"hours per shift: {hours_per_shift}."
         )
 
-with tab7:
+if show_legacy:
+ with tab7:
 
     st.header("💰 Casual Pay Estimator")
     st.caption(
@@ -1569,9 +2236,9 @@ with tab7:
 
 
 # ---------------------------------------------------------------------------
-# Tab: Payslip Calibration
+# Tab: Payslip Calibration (main)
 # ---------------------------------------------------------------------------
-with tab8:
+with tab_pc:
     import datetime as _dt_ps
     import pandas as _pd_ps
 
@@ -1705,6 +2372,9 @@ with tab8:
     )
 
     if st.button("📊 Calculate", key="ps_calculate"):
+
+        # Store entered net pay so Weekly Assistant can use the effective net rate
+        st.session_state.wa_entered_net = _ps_entered_net
 
         # Derive totals
         _cp_gross  = current_period_gross(_items)
