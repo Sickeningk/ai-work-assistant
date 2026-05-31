@@ -158,6 +158,9 @@ if "roster_chat" not in st.session_state:
 if "saved_chat" not in st.session_state:
     st.session_state.saved_chat = []
 
+if "active_roster_key" not in st.session_state:
+    st.session_state.active_roster_key = None
+
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📅 Current Roster",
     "📊 Analytics",
@@ -442,7 +445,26 @@ with tab3:
             fuel_cost
         )
 
+        # Build a unique key for the current roster using month, year, and exact days
+        current_roster_key = f"{month_name}-{year}-{','.join(str(d) for d in sorted(scheduled_days))}"
+
+        # Detect if the loaded roster has changed while chat history exists
+        if (
+            st.session_state.active_roster_key is not None
+            and st.session_state.active_roster_key != current_roster_key
+            and st.session_state.roster_chat
+        ):
+            st.warning(
+                "⚠️ The loaded roster has changed. "
+                "Earlier chat messages may refer to a different roster."
+            )
+        st.session_state.active_roster_key = current_roster_key
+
         st.subheader("Ask About Current Roster")
+        st.caption(
+            f"📋 Current loaded roster: {month_name} {year} — "
+            f"{len(scheduled_days)} shift{'s' if len(scheduled_days) != 1 else ''}"
+        )
 
         # Render chat history
         for msg in st.session_state.roster_chat:
@@ -468,7 +490,11 @@ with tab3:
                     None
                 )
                 if week_match:
-                    reply = format_week_answer(week_match, include_income=asks_about_income(user_question))
+                    reply = format_week_answer(
+                        week_match,
+                        include_income=asks_about_income(user_question),
+                        roster_label=f"{month_name} {year}"
+                    )
                 else:
                     reply = f"I could not find week {week_num} for this roster."
                 st.session_state.roster_chat.append(
