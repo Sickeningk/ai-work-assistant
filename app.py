@@ -506,6 +506,34 @@ with tab3:
             # --- Python-first: answer week questions without calling OpenAI ---
             week_num = detect_week_question(user_question)
             if week_num is not None:
+                _, mentioned_months = detect_saved_week_question(user_question)
+
+                # Scope check: redirect if user asks about a different month
+                if len(mentioned_months) > 1:
+                    # Multiple months → redirect to Saved Rosters chat
+                    reply = (
+                        f"This chat only uses the currently loaded roster: "
+                        f"**{month_name} {year}**. "
+                        f"For questions about multiple months, use the **Saved Rosters chat** below."
+                    )
+                    st.session_state.roster_chat.append(
+                        {"role": "assistant", "content": reply}
+                    )
+                    st.rerun()
+                elif len(mentioned_months) == 1 and mentioned_months[0].lower() != month_name.lower():
+                    # Single month that doesn't match loaded roster → redirect
+                    reply = (
+                        f"This chat only uses the currently loaded roster: "
+                        f"**{month_name} {year}**. "
+                        f"For {mentioned_months[0]} or other saved months, "
+                        f"use the **Saved Rosters chat** below."
+                    )
+                    st.session_state.roster_chat.append(
+                        {"role": "assistant", "content": reply}
+                    )
+                    st.rerun()
+
+                # No month mentioned, or month matches loaded roster → answer normally
                 week_match = next(
                     (w for w in week_breakdown if w["week_number"] == week_num),
                     None
