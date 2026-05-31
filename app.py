@@ -150,8 +150,6 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
             f"- Net per shift: \\${nps:,.2f}",
             f"- {needed} shifts gross: \\${proj['gross']:,.2f}",
             f"- {needed} shifts net: \\${proj['net']:,.2f}",
-            "",
-            f"*Based on: {roster_label}*",
         ]
         return "\n".join(lines)
 
@@ -164,8 +162,6 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
             f"- Gross income: \\${proj['gross']:,.2f}",
             f"- Net income: \\${proj['net']:,.2f}",
             f"- Net per shift: \\${nps:,.2f}",
-            "",
-            f"*Based on: {roster_label}*",
         ]
         return "\n".join(lines)
 
@@ -177,8 +173,6 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
             f"- Lost gross income: \\${skip['lost_gross']:,.2f}",
             f"- Fuel saved: \\${skip['saved_fuel']:,.2f}",
             f"- **Net income lost: \\${skip['lost_net']:,.2f}**",
-            "",
-            f"*Based on: {roster_label}*",
         ]
         return "\n".join(lines)
 
@@ -189,8 +183,6 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
             f"- Gross per shift: \\${gps:,.2f}",
             f"- Fuel cost: \\${fuel_cost:,.2f}",
             f"- **Net per shift: \\${nps:,.2f}**",
-            "",
-            f"*Based on: {roster_label}*",
         ]
         return "\n".join(lines)
 
