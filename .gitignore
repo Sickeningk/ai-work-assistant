@@ -26,3 +26,6 @@ app_original.py
 
 # Backups folder
 backups/
+
+# Claude Cowork session data
+.claude/

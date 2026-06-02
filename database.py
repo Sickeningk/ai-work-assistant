@@ -48,6 +48,22 @@ def init_db():
         )
     """)
 
+    # Payslip calibration history — one row per save, latest is active
+    # Does NOT store personal identity data (no TFN, name, bank details, etc.)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payslip_calibrations (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            saved_at                TEXT,
+            label                   TEXT,
+            payslip_lines           TEXT,
+            entered_net             REAL,
+            effective_tax_rate      REAL,
+            effective_help_rate     REAL,
+            effective_combined_rate REAL,
+            effective_net_rate      REAL
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -179,6 +195,107 @@ def load_weekly_roster_by_start(week_start_date: str):
         "source": row[3],
         "created_at": row[4],
     }
+
+
+def save_payslip_calibration(
+    label: str,
+    lines: list,
+    entered_net: float,
+    rates_dict: dict,
+) -> int:
+    """
+    Append a new payslip calibration snapshot. Returns the new row id.
+    Stores only numeric values and manually entered line items — no personal identity data.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO payslip_calibrations (
+            saved_at, label, payslip_lines, entered_net,
+            effective_tax_rate, effective_help_rate,
+            effective_combined_rate, effective_net_rate
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        label,
+        json.dumps(lines),
+        entered_net,
+        rates_dict.get("effective_tax_rate"),
+        rates_dict.get("effective_help_rate"),
+        rates_dict.get("effective_combined_rate"),
+        rates_dict.get("effective_net_rate"),
+    ))
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
+def load_latest_payslip_calibration() -> dict | None:
+    """
+    Return the most recently saved payslip calibration as a dict, or None if none exist.
+    payslip_lines is deserialised back to a list of dicts.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, saved_at, label, payslip_lines, entered_net,
+               effective_tax_rate, effective_help_rate,
+               effective_combined_rate, effective_net_rate
+        FROM payslip_calibrations
+        ORDER BY id DESC
+        LIMIT 1
+    """)
+    row = cursor.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return {
+        "id":                      row[0],
+        "saved_at":                row[1],
+        "label":                   row[2],
+        "payslip_lines":           json.loads(row[3]),
+        "entered_net":             row[4],
+        "effective_tax_rate":      row[5],
+        "effective_help_rate":     row[6],
+        "effective_combined_rate": row[7],
+        "effective_net_rate":      row[8],
+    }
+
+
+def list_payslip_calibrations() -> list:
+    """
+    Return all saved calibrations, newest first, as a list of dicts.
+    payslip_lines is NOT deserialised (kept as JSON string) to avoid overhead.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, saved_at, label, entered_net,
+               effective_tax_rate, effective_help_rate,
+               effective_combined_rate, effective_net_rate
+        FROM payslip_calibrations
+        ORDER BY id DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [
+        {
+            "id":                      r[0],
+            "saved_at":                r[1],
+            "label":                   r[2],
+            "entered_net":             r[3],
+            "effective_tax_rate":      r[4],
+            "effective_help_rate":     r[5],
+            "effective_combined_rate": r[6],
+            "effective_net_rate":      r[7],
+        }
+        for r in rows
+    ]
 
 
 def clear_monthly_rosters():
