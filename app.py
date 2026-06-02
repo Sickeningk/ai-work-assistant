@@ -527,7 +527,7 @@ def format_wa_answer(
         if help_rate is not None and help_rate > 0:
             help_withheld = round(gross * help_rate, 2)
             lines.append(
-                f"| Est. HELP withheld ({help_rate*100:.1f}%) "
+                f"| Est. student loan / HELP ({help_rate*100:.1f}%) "
                 f"| −\\${help_withheld:,.2f} |"
             )
             any_breakdown = True
@@ -535,7 +535,7 @@ def format_wa_answer(
         if not any_breakdown and combined_rate is not None and combined_rate > 0:
             withheld = round(gross * combined_rate, 2)
             lines.append(
-                f"| Est. tax & HELP withheld ({combined_rate*100:.1f}%) "
+                f"| Est. tax & student loan / HELP withheld ({combined_rate*100:.1f}%) "
                 f"| −\\${withheld:,.2f} |"
             )
             any_breakdown = True
@@ -600,7 +600,7 @@ def format_wa_answer(
             f"Your estimated take-home this week is **\\${_th_net:,.2f}**.",
             "",
             f"- Gross pay: \\${gross:,.2f}",
-            f"- Income tax & HELP withheld: −\\${_th_withheld:,.2f}",
+            f"- Income tax & student loan / HELP withheld: −\\${_th_withheld:,.2f}",
             f"- **Est. take-home: \\${_th_net:,.2f}**",
             f"- Take-home per shift: \\${_th_per:,.2f}",
             "",
@@ -919,7 +919,7 @@ def build_projected_payslip_xlsx(
 
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
     subtitle = ws.cell(row=r, column=1,
-        value=f"Pay period: {week_start.strftime('Sun %-d %b %Y')} — {week_end.strftime('Sat %-d %b %Y')}")
+        value=f"Pay period: {week_start.strftime('Sun %-d %b %Y')} – {week_end.strftime('Sat %-d %b %Y')}")
     subtitle.font = Font(italic=True, size=10)
     subtitle.fill = BLUE_FILL
     subtitle.font = Font(italic=True, size=10, color="FFFFFF")
@@ -956,7 +956,7 @@ def build_projected_payslip_xlsx(
     data_row(ws, r, ["Income tax (est.)", tax_rate, -tax_est, ""],
              [None, FMT_PCT, FMT_CURRENCY, None])
     r += 1
-    data_row(ws, r, ["HELP withheld (est.)", help_rate, -help_est, ""],
+    data_row(ws, r, ["Student loan / HELP (est.)", help_rate, -help_est, ""],
              [None, FMT_PCT, FMT_CURRENCY, None])
     r += 1
     total_row = data_row(ws, r, ["Total withheld (est.)", combined_rate, -combined_est, ""],
@@ -1215,7 +1215,7 @@ with tab_wa:
             )
             st.markdown(f"📅 {_wa_date_str}")
             st.caption(
-                f"Week: **{_wa_week_start.strftime('%-d %b')}** — "
+                f"Week: **{_wa_week_start.strftime('%-d %b')}** – "
                 f"**{_wa_week_end.strftime('%-d %b %Y')}**"
             )
 
@@ -1247,7 +1247,7 @@ with tab_wa:
                 "|:---|---:|---:|\n"
                 f"| Gross income | **${_wa_gross:,.2f}** | — |\n"
                 f"| Income tax (est.) | −${_wa_tax_est:,.2f} | {_wa_tax_rate*100:.2f}% |\n"
-                f"| HELP withheld (est.) | −${_wa_help_est:,.2f} | {_wa_help_rate*100:.2f}% |\n"
+                f"| Student loan / HELP (est.) | −${_wa_help_est:,.2f} | {_wa_help_rate*100:.2f}% |\n"
                 f"| Total withheld (est.) | −${_wa_combined_est:,.2f} | {_wa_cr*100:.2f}% |\n"
                 f"| **Estimated take-home** | **${_wa_net_est:,.2f}** | {_wa_net_rate*100:.2f}% |\n"
                 f"| Take-home per shift | **${_wa_per_shift:,.2f}** | — |"
@@ -1309,8 +1309,8 @@ with tab_wa:
             else:
                 st.caption(
                     f"Rates based on your previous payslip withholding pattern "
-                    f"(income tax {st.session_state.wa_tax_rate_pct:.2f}% · "
-                    f"HELP {st.session_state.wa_help_rate_pct:.2f}%)."
+                    f"(income tax {st.session_state.wa_tax_rate_pct:.1f}% · "
+                    f"student loan / HELP {st.session_state.wa_help_rate_pct:.1f}%)."
                 )
 
             # ── Projected Payslip Estimate expander ───────────────────────
@@ -1318,7 +1318,7 @@ with tab_wa:
 
                 # In-app preview
                 _pp_week_range = (
-                    f"{_wa_week_start.strftime('Sun %-d %b %Y')} — "
+                    f"{_wa_week_start.strftime('Sun %-d %b %Y')} – "
                     f"{_wa_week_end.strftime('Sat %-d %b %Y')}"
                 )
                 st.markdown(f"**Projected Payslip Estimate** — {_pp_week_range}")
@@ -1338,7 +1338,7 @@ with tab_wa:
                     "| Description | Rate (%) | Amount ($) |\n"
                     "|:---|---:|---:|\n"
                     f"| Income tax (est.) | {_wa_tax_rate*100:.2f}% | −${_wa_tax_est:,.2f} |\n"
-                    f"| HELP withheld (est.) | {_wa_help_rate*100:.2f}% | −${_wa_help_est:,.2f} |\n"
+                    f"| Student loan / HELP (est.) | {_wa_help_rate*100:.2f}% | −${_wa_help_est:,.2f} |\n"
                     f"| **Total withheld (est.)** | **{_wa_cr*100:.2f}%** | **−${_wa_combined_est:,.2f}** |"
                 )
 
@@ -1896,7 +1896,7 @@ if _ADMIN_MODE or show_legacy:
                 _ws = _dt_tw.date.fromisoformat(_r["week_start_date"])
                 _we = _dt_tw.date.fromisoformat(_r["week_end_date"])
                 _tw_labels.append(
-                    f"Sun {_ws.strftime('%-d %b')} — Sat {_we.strftime('%-d %b %Y')}"
+                    f"Sun {_ws.strftime('%-d %b')} – Sat {_we.strftime('%-d %b %Y')}"
                 )
             except Exception:
                 _tw_labels.append(_r["week_start_date"])

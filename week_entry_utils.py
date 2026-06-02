@@ -27,6 +27,24 @@ def next_sunday(from_date: date = None) -> date:
     return from_date + timedelta(days=days_until_sunday)
 
 
+def current_week_sunday(from_date: date = None) -> date:
+    """
+    Return the most recent Sunday on or before from_date.
+    i.e. the start of the Amazon work week that contains from_date.
+    If from_date is None, uses today.
+
+    Examples (weekday() Mon=0 … Sun=6):
+      Monday  → last Sunday  (days_since_sunday = 1)
+      Friday  → last Sunday  (days_since_sunday = 5)
+      Sunday  → today        (days_since_sunday = 0)
+    """
+    if from_date is None:
+        from_date = date.today()
+    # (weekday() + 1) % 7  →  Mon=1, Tue=2, …, Sat=6, Sun=0
+    days_since_sunday = (from_date.weekday() + 1) % 7
+    return from_date - timedelta(days=days_since_sunday)
+
+
 def week_dates(week_start: date) -> list:
     """
     Given a Sunday start date, return a list of 7 date objects: Sun, Mon, ..., Sat.
@@ -43,12 +61,12 @@ def day_label(d: date) -> str:
 
 def week_label(week_start: date) -> str:
     """
-    Return a range label for the week, e.g. 'Sun 7 Jun — Sat 13 Jun 2026'.
+    Return a range label for the week, e.g. 'Sun 7 Jun – Sat 13 Jun 2026'.
     """
     week_end = week_start + timedelta(days=6)
     return (
         f"Sun {week_start.strftime('%-d %b')} "
-        f"— Sat {week_end.strftime('%-d %b %Y')}"
+        f"– Sat {week_end.strftime('%-d %b %Y')}"
     )
 
 
