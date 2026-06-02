@@ -16,9 +16,13 @@ from database import (
     load_weekly_rosters_dataframe,
     load_weekly_roster_by_start,
     clear_monthly_rosters,
+    save_payslip_calibration,
+    load_latest_payslip_calibration,
+    list_payslip_calibrations,
 )
 from week_entry_utils import (
     next_sunday,
+    current_week_sunday,
     week_dates,
     day_label,
     week_label,
@@ -73,6 +77,13 @@ from forecasting import (
 
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Employee / Admin mode
+# Set PAYSLIP_ADMIN=1 in your environment or .env to enable admin controls.
+# Default (employee mode) hides all developer/admin UI.
+# ---------------------------------------------------------------------------
+_ADMIN_MODE = os.environ.get("PAYSLIP_ADMIN", "0").strip() == "1"
 
 
 def get_openai_client():
@@ -214,7 +225,7 @@ def format_forecasting_answer(question_type, value, hourly_rate, hours_per_shift
             "Per shift breakdown:",
             "",
             f"- **Gross per shift: \\${gps:,.2f}**",
-            f"- Use **🧾 Payslip Calibration** to estimate take-home after tax and HELP.",
+            f"- Adjust your **My pay rates** below if your withholding rates have changed.",
         ]
         return "\n".join(lines)
 
@@ -434,11 +445,10 @@ def format_wa_answer(
                 return "⚠️ Gross per shift is zero — check your hourly rate and hours per shift settings."
             proj_gross = round(n * gps, 2)
             return (
-                f"No payslip calibration found — can't estimate take-home directly.\n\n"
+                f"⚠️ No withholding rates found — showing gross only.\n\n"
                 f"To earn \\${target:,.2f} **gross** (closest proxy), "
                 f"you need **{n} shifts** (≈ \\${proj_gross:,.2f} gross).\n\n"
-                "Add your payslip in **🧾 Payslip Calibration** "
-                "to calculate shifts needed for a take-home target."
+                "Adjust **My pay rates** below if your withholding rates have changed."
             )
         net_per_shift = round(gps * net_rate, 2)
         if net_per_shift <= 0:
@@ -452,7 +462,7 @@ def format_wa_answer(
             f"- Est. take-home per shift: \\${net_per_shift:,.2f} "
             f"(net rate {net_rate*100:.1f}%)\n"
             f"- {n} shifts → gross \\${proj_gross:,.2f} → est. take-home \\${proj_net:,.2f}\n\n"
-            "*Based on Payslip Calibration effective net rate.*"
+            "*Projected pay estimate based on previous payslip withholding pattern.*"
         )
 
     # ------------------------------------------------------------------
@@ -536,13 +546,12 @@ def format_wa_answer(
         lines.append("")
         if not any_breakdown and not net_rate:
             lines.append(
-                "⚠️ No payslip calibration found — showing gross only.  \n"
-                "Add your payslip in **🧾 Payslip Calibration** for tax/HELP estimates."
+                "⚠️ No withholding rates found — showing gross only."
             )
         else:
             if not net_rate:
                 lines.append(
-                    "💡 Enter your net pay in **🧾 Payslip Calibration → Calculate** "
+                    "💡 Adjust **My pay rates** below if your withholding rates have changed "
                     "to unlock the take-home estimate."
                 )
             if has_adj:
@@ -551,8 +560,9 @@ def format_wa_answer(
                     "estimate may vary from a normal week."
                 )
             lines.append(
-                "*Estimates only. Based on Payslip Calibration effective rates. "
-                "Not tax advice.*"
+                "*Estimate only. Based on your previous payslip withholding pattern. "
+                "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
+                "and employer payroll rules.*"
             )
         return "\n".join(lines)
 
@@ -568,7 +578,7 @@ def format_wa_answer(
             income_label = "estimated take-home"
         else:
             income       = gross
-            income_label = "estimated gross (no payslip calibration)"
+            income_label = "estimated gross"
         if income >= amount:
             left = round(income - amount, 2)
             return (
@@ -639,45 +649,53 @@ saved_hourly_rate, saved_hours_per_shift, saved_fuel_cost = load_settings()
 fuel_cost = 0.0
 
 st.set_page_config(
-    page_title="AI Work Assistant",
+    page_title="Payslip Projector",
     layout="wide"
 )
 
-st.title("AI Work Assistant")
+st.title("Payslip Projector")
 
-st.sidebar.header("Settings")
+if _ADMIN_MODE:
+    st.sidebar.header("Settings (Admin)")
 
-hourly_rate = st.sidebar.number_input(
-    "Hourly Rate ($)",
-    min_value=0.0,
-    value=float(saved_hourly_rate),
-    step=1.0
-)
-
-hours_per_shift = st.sidebar.number_input(
-    "Hours Per Shift",
-    min_value=0.0,
-    value=float(saved_hours_per_shift),
-    step=0.5
-)
-
-if st.sidebar.button("Save Settings"):
-    save_settings(
-        hourly_rate,
-        hours_per_shift,
-        fuel_cost   # preserves DB column; always saves 0.0 going forward
+    hourly_rate = st.sidebar.number_input(
+        "Hourly Rate ($)",
+        min_value=0.0,
+        value=float(saved_hourly_rate),
+        step=1.0
     )
 
-    st.sidebar.success("Settings saved.")
+    hours_per_shift = st.sidebar.number_input(
+        "Hours Per Shift",
+        min_value=0.0,
+        value=float(saved_hours_per_shift),
+        step=0.5
+    )
 
-st.sidebar.write("Current Settings")
-st.sidebar.write(f"Hourly Rate: ${hourly_rate}")
-st.sidebar.write(f"Hours Per Shift: {hours_per_shift}")
+    if st.sidebar.button("Save Settings"):
+        save_settings(
+            hourly_rate,
+            hours_per_shift,
+            fuel_cost
+        )
+        st.sidebar.success("Settings saved.")
 
-st.sidebar.divider()
-show_legacy = st.sidebar.checkbox("Show Advanced / Legacy Tools", value=False)
-show_debug = st.sidebar.checkbox("Show Developer Debug", value=False)
-show_older_answers = st.sidebar.checkbox("Show older roster answers", value=False)
+    st.sidebar.write("Current Settings")
+    st.sidebar.write(f"Hourly Rate: ${hourly_rate}")
+    st.sidebar.write(f"Hours Per Shift: {hours_per_shift}")
+
+    st.sidebar.divider()
+    show_legacy = st.sidebar.checkbox("Show Advanced / Legacy Tools", value=False)
+    show_debug = st.sidebar.checkbox("Show Developer Debug", value=False)
+    show_older_answers = st.sidebar.checkbox("Show older roster answers", value=False)
+
+else:
+    # Employee mode — read saved values, hide all editable controls
+    hourly_rate     = float(saved_hourly_rate)
+    hours_per_shift = float(saved_hours_per_shift)
+    show_legacy         = False
+    show_debug          = False
+    show_older_answers  = False
 
 if "roster_data" not in st.session_state:
     st.session_state.roster_data = None
@@ -714,16 +732,270 @@ if "wa_last_nl_parsed" not in st.session_state:
 if "wa_last_week_key" not in st.session_state:
     st.session_state.wa_last_week_key = None
 
-# Entered net pay from Payslip Calibration — used to compute take-home rate
+# Entered net pay from Payslip Calibration — used by legacy tab_pc only
 if "wa_entered_net" not in st.session_state:
     st.session_state.wa_entered_net = 0.0
 
 # ---------------------------------------------------------------------------
-# Tab layout — 3 main tabs always visible; legacy tools shown when toggled
+# Default withholding rates — derived from previous payslip:
+#   Gross 1529.48 / Marginal tax 313.00 / HELP 38.00 / Net 1178.48
+# ---------------------------------------------------------------------------
+_WA_DEFAULT_TAX_RATE  = round(313.00 / 1529.48, 6)   # ≈ 20.46%
+_WA_DEFAULT_HELP_RATE = round(38.00  / 1529.48, 6)   # ≈  2.48%
+
+# User-adjustable rates (tax + HELP only; combined/net derived automatically)
+if "wa_tax_rate_pct" not in st.session_state:
+    st.session_state.wa_tax_rate_pct  = round(_WA_DEFAULT_TAX_RATE  * 100, 4)
+if "wa_help_rate_pct" not in st.session_state:
+    st.session_state.wa_help_rate_pct = round(_WA_DEFAULT_HELP_RATE * 100, 4)
+
+# ID of the calibration row that was auto-loaded from DB this session (None = not loaded / freshly calculated)
+if "wa_calibration_loaded_id" not in st.session_state:
+    st.session_state.wa_calibration_loaded_id = None
+
+# Auto-load latest saved calibration on first run (only if session state is still at defaults)
+if (
+    st.session_state.wa_calibration_loaded_id is None
+    and not st.session_state.payslip_lines
+    and st.session_state.wa_entered_net == 0.0
+):
+    _boot_cal = load_latest_payslip_calibration()
+    if _boot_cal is not None:
+        st.session_state.payslip_lines         = _boot_cal["payslip_lines"]
+        st.session_state.wa_entered_net        = _boot_cal["entered_net"] or 0.0
+        st.session_state.wa_calibration_loaded_id = _boot_cal["id"]
+        st.session_state.wa_calibration_label  = _boot_cal["label"]
+        st.session_state.wa_calibration_saved_at = _boot_cal["saved_at"]
+
+# Label + timestamp for the loaded/saved calibration (persists in session)
+if "wa_calibration_label" not in st.session_state:
+    st.session_state.wa_calibration_label = None
+if "wa_calibration_saved_at" not in st.session_state:
+    st.session_state.wa_calibration_saved_at = None
+
+# ---------------------------------------------------------------------------
+# Projected Payslip Excel builder
+# ---------------------------------------------------------------------------
+
+def build_projected_payslip_xlsx(
+    week_start,        # date
+    week_end,          # date
+    selected_dates,    # list[date]
+    n_shifts,          # int
+    total_hours,       # float
+    hourly_rate,       # float
+    hours_per_shift,   # float
+    gross,             # float
+    tax_rate,          # float (0–1)
+    tax_est,           # float
+    help_rate,         # float (0–1)
+    help_est,          # float
+    combined_rate,     # float (0–1)
+    combined_est,      # float
+    net_rate,          # float (0–1)
+    net_est,           # float
+    per_shift,         # float
+):
+    """
+    Build a professionally formatted Projected Payslip Estimate xlsx in memory.
+    Returns a BytesIO object ready for st.download_button.
+    All values are pre-computed — this function does no financial calculation.
+    """
+    import io
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import (
+            Font, PatternFill, Alignment, Border, Side, numbers
+        )
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        return None  # caller checks for None and shows friendly error
+
+    # ── Helpers ─────────────────────────────────────────────────────────────
+    GREY_FILL   = PatternFill("solid", fgColor="D9D9D9")
+    BLUE_FILL   = PatternFill("solid", fgColor="1F497D")
+    LIGHT_FILL  = PatternFill("solid", fgColor="EBF1DE")
+    THIN        = Side(style="thin")
+    THIN_BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+    BOT_BORDER  = Border(bottom=Side(style="medium"))
+
+    FMT_CURRENCY = '$#,##0.00'
+    FMT_CURRENCY_NEG = '-$#,##0.00'
+    FMT_PCT      = '0.00%'
+
+    def title_cell(ws, row, col, value, size=14):
+        c = ws.cell(row=row, column=col, value=value)
+        c.font = Font(bold=True, size=size, color="FFFFFF")
+        c.fill = BLUE_FILL
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        return c
+
+    def section_header(ws, row, label, ncols=4):
+        c = ws.cell(row=row, column=1, value=label)
+        c.font = Font(bold=True, size=11)
+        c.fill = GREY_FILL
+        c.border = BOT_BORDER
+        for col in range(2, ncols + 1):
+            wc = ws.cell(row=row, column=col)
+            wc.fill = GREY_FILL
+            wc.border = BOT_BORDER
+
+    def col_header(ws, row, values):
+        for i, v in enumerate(values, start=1):
+            c = ws.cell(row=row, column=i, value=v)
+            c.font = Font(bold=True)
+            c.fill = LIGHT_FILL
+            c.border = THIN_BORDER
+            c.alignment = Alignment(horizontal="center")
+
+    def data_row(ws, row, values, formats=None):
+        for i, v in enumerate(values, start=1):
+            c = ws.cell(row=row, column=i, value=v)
+            c.border = THIN_BORDER
+            if formats and i - 1 < len(formats) and formats[i - 1]:
+                c.number_format = formats[i - 1]
+        return ws[row]
+
+    # ── Workbook ─────────────────────────────────────────────────────────────
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Projected Payslip"
+    ws.sheet_view.showGridLines = False
+
+    # Column widths
+    col_widths = [32, 14, 14, 16]
+    for i, w in enumerate(col_widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    r = 1  # current row counter
+
+    # ── Title ─────────────────────────────────────────────────────────────────
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+    title_cell(ws, r, 1, "PROJECTED PAYSLIP ESTIMATE", size=14)
+    ws.row_dimensions[r].height = 28
+    r += 1
+
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+    subtitle = ws.cell(row=r, column=1,
+        value=f"Pay period: {week_start.strftime('Sun %-d %b %Y')} — {week_end.strftime('Sat %-d %b %Y')}")
+    subtitle.font = Font(italic=True, size=10)
+    subtitle.fill = BLUE_FILL
+    subtitle.font = Font(italic=True, size=10, color="FFFFFF")
+    subtitle.alignment = Alignment(horizontal="center")
+    r += 1
+
+    from datetime import date as _date
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+    gen = ws.cell(row=r, column=1, value=f"Generated: {_date.today().strftime('%-d %b %Y')}")
+    gen.font = Font(italic=True, size=9, color="595959")
+    gen.alignment = Alignment(horizontal="right")
+    r += 1
+
+    r += 1  # blank
+
+    # ── Earnings ──────────────────────────────────────────────────────────────
+    section_header(ws, r, "EARNINGS", ncols=4)
+    r += 1
+    col_header(ws, r, ["Description", "Hours", "Rate ($/hr)", "Amount ($)"])
+    r += 1
+    data_row(ws, r,
+        ["Night Shift / Casual", total_hours, hourly_rate, gross],
+        [None, "0.00", FMT_CURRENCY, FMT_CURRENCY])
+    ws.cell(row=r, column=1).font = Font(bold=False)
+    r += 1
+
+    r += 1  # blank
+
+    # ── Withholding ───────────────────────────────────────────────────────────
+    section_header(ws, r, "WITHHOLDING (ESTIMATED)", ncols=4)
+    r += 1
+    col_header(ws, r, ["Description", "Rate (%)", "Amount ($)", ""])
+    r += 1
+    data_row(ws, r, ["Income tax (est.)", tax_rate, -tax_est, ""],
+             [None, FMT_PCT, FMT_CURRENCY, None])
+    r += 1
+    data_row(ws, r, ["HELP withheld (est.)", help_rate, -help_est, ""],
+             [None, FMT_PCT, FMT_CURRENCY, None])
+    r += 1
+    total_row = data_row(ws, r, ["Total withheld (est.)", combined_rate, -combined_est, ""],
+                          [None, FMT_PCT, FMT_CURRENCY, None])
+    for col in range(1, 4):
+        ws.cell(row=r, column=col).font = Font(bold=True)
+    r += 1
+
+    r += 1  # blank
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    section_header(ws, r, "SUMMARY", ncols=4)
+    r += 1
+    col_header(ws, r, ["", "Amount ($)", "Rate (%)", ""])
+    r += 1
+    data_row(ws, r, ["Gross income", gross, "", ""],
+             [None, FMT_CURRENCY, None, None])
+    r += 1
+    data_row(ws, r, ["Total withheld (est.)", -combined_est, combined_rate, ""],
+             [None, FMT_CURRENCY, FMT_PCT, None])
+    r += 1
+    takehome_r = r
+    data_row(ws, r, ["ESTIMATED TAKE-HOME", net_est, net_rate, ""],
+             [None, FMT_CURRENCY, FMT_PCT, None])
+    for col in range(1, 3):
+        ws.cell(row=takehome_r, column=col).font = Font(bold=True, size=11)
+        ws.cell(row=takehome_r, column=col).fill = LIGHT_FILL
+    r += 1
+    data_row(ws, r, ["Take-home per shift", per_shift, "", ""],
+             [None, FMT_CURRENCY, None, None])
+    r += 1
+
+    r += 1  # blank
+
+    # ── Shift details ─────────────────────────────────────────────────────────
+    section_header(ws, r, "SHIFT DETAILS", ncols=4)
+    r += 1
+    col_header(ws, r, ["Day", "Date", "Hours", "Rate ($/hr)"])
+    r += 1
+    for d in sorted(selected_dates):
+        data_row(ws, r,
+            [d.strftime("%A"), d.strftime("%-d %b %Y"), hours_per_shift, hourly_rate],
+            [None, None, "0.00", FMT_CURRENCY])
+        r += 1
+
+    r += 1  # blank
+
+    # ── Totals row ────────────────────────────────────────────────────────────
+    data_row(ws, r, ["TOTAL", f"{n_shifts} shifts", f"{total_hours:.2f} h", ""],
+             [None, None, None, None])
+    for col in range(1, 3):
+        ws.cell(row=r, column=col).font = Font(bold=True)
+    r += 1
+
+    r += 1  # blank
+
+    # ── Disclaimer ────────────────────────────────────────────────────────────
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+    disc = ws.cell(row=r, column=1,
+        value=(
+            "Estimate only. Based on your previous payslip withholding pattern. "
+            "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
+            "and employer payroll rules."
+        ))
+    disc.font = Font(italic=True, size=9, color="595959")
+    disc.alignment = Alignment(wrap_text=True)
+    ws.row_dimensions[r].height = 30
+
+    # ── Serialise ─────────────────────────────────────────────────────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+# ---------------------------------------------------------------------------
+# Tab layout — 2 main tabs by default; legacy tools (inc. Payslip Calibration tab) shown when toggled
 # ---------------------------------------------------------------------------
 if show_legacy:
     tab_wa, tab_tw, tab_pc, tab_we, tab1, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "🗓 Weekly Assistant",
+        "💰 Payslip Projector",
         "📊 This Week",
         "🧾 Payslip Calibration",
         "🗓 Weekly Entry",
@@ -735,10 +1007,9 @@ if show_legacy:
         "💰 Casual Pay Estimator",
     ])
 else:
-    tab_wa, tab_tw, tab_pc = st.tabs([
-        "🗓 Weekly Assistant",
+    tab_wa, tab_tw = st.tabs([
+        "💰 Payslip Projector",
         "📊 This Week",
-        "🧾 Payslip Calibration",
     ])
 
 
@@ -748,17 +1019,32 @@ else:
 with tab_wa:
     import datetime as _dt_wa
 
-    st.header("🗓 Weekly Assistant")
+    st.header("💰 Payslip Projector")
 
     # ── Week selector ──────────────────────────────────────────────────────
-    _wa_col_left, _wa_col_right = st.columns([2, 5])
-    with _wa_col_left:
-        _wa_default_sunday = next_sunday(_dt_wa.date.today())
-        _wa_week_start = st.date_input(
-            "Week starting (Sunday)",
-            value=_wa_default_sunday,
-            key="wa_week_start",
+    _wa_default_sunday = current_week_sunday(_dt_wa.date.today())
+
+    if _ADMIN_MODE:
+        _wa_col_left, _wa_col_right = st.columns([2, 5])
+        with _wa_col_left:
+            _wa_week_start = st.date_input(
+                "Week starting (Sunday)",
+                value=_wa_default_sunday,
+                key="wa_week_start",
+            )
+    else:
+        _wa_week_start = _wa_default_sunday
+        _wa_week_end_disp = _wa_default_sunday + _dt_wa.timedelta(days=6)
+        st.caption(
+            f"Pay week: **{_wa_default_sunday.strftime('%-d %b')} "
+            f"– {_wa_week_end_disp.strftime('%-d %b %Y')}**"
         )
+        with st.expander("Change week", expanded=False):
+            _wa_week_start = st.date_input(
+                "Week starting (Sunday)",
+                value=_wa_default_sunday,
+                key="wa_week_start",
+            )
 
     if _wa_week_start.weekday() != 6:
         st.warning(
@@ -792,11 +1078,15 @@ with tab_wa:
         _wa_existing      = load_weekly_roster_by_start(_wa_week_key)
         _wa_existing_isos = set(_wa_existing["scheduled_dates"]) if _wa_existing else set()
 
-        # ── Conversational prompt ─────────────────────────────────────────
-        st.markdown(
-            f"#### What shifts did Amazon give you for the week starting "
-            f"**{_wa_week_start.strftime('Sunday %-d %b')}**?"
-        )
+        # ── Context-aware prompt heading ──────────────────────────────────
+        _today_wd = _dt_wa.date.today().weekday()  # Mon=0 … Sun=6
+        if _today_wd == 4:   # Friday — roster arrives
+            _wa_heading = "🗓 Roster day — what shifts did Amazon give you for next week?"
+        elif _today_wd == 6:  # Sunday — week starts today
+            _wa_heading = "🗓 New week — what shifts are you working this week?"
+        else:
+            _wa_heading = "🗓 What shifts are you working this week?"
+        st.markdown(f"#### {_wa_heading}")
 
         _wa_nl = st.text_input(
             "shifts_input",
@@ -828,7 +1118,7 @@ with tab_wa:
             st.session_state.wa_last_nl_parsed = _wa_nl
 
         # ── Fine-tune expander with checkboxes ────────────────────────────
-        with st.expander("Fine-tune shifts", expanded=False):
+        with st.expander("Change my shifts", expanded=False):
             st.caption("Tick to adjust individual days. Overrides the text input above.")
             _wa_selected = []
             _wa_chk_cols = st.columns(7)
@@ -841,23 +1131,19 @@ with tab_wa:
                 if _checked:
                     _wa_selected.append(_d)
 
-        # ── Payslip calibration rates ─────────────────────────────────────
-        _wa_pc_items    = st.session_state.payslip_lines
-        _wa_pc_gross    = pc_total_gross(_wa_pc_items) if _wa_pc_items else 0.0
-        _wa_entered_net = st.session_state.wa_entered_net  # set by Payslip Calibration tab
+        # ── Withholding rates from session state (user-adjustable) ──────────
+        _wa_tax_rate  = st.session_state.wa_tax_rate_pct  / 100.0
+        _wa_help_rate = st.session_state.wa_help_rate_pct / 100.0
+        _wa_cr        = _wa_tax_rate + _wa_help_rate          # combined, derived
+        _wa_net_rate  = 1.0 - _wa_cr                          # take-home, derived
 
-        # Full rates (including take-home): requires entered_net > 0
-        _wa_pc_rates = (
-            pc_effective_rates(_wa_pc_items, _wa_entered_net)
-            if _wa_pc_items and _wa_pc_gross > 0 and _wa_entered_net > 0
-            else None
-        )
-        # Tax/HELP-only rates: valid even without entered_net
-        _wa_pc_tax_rates = (
-            pc_effective_rates(_wa_pc_items, 0.0)
-            if _wa_pc_items and _wa_pc_gross > 0
-            else None
-        )
+        # Build a rates dict compatible with format_wa_answer
+        _wa_rates_dict = {
+            "effective_tax_rate":      _wa_tax_rate,
+            "effective_help_rate":     _wa_help_rate,
+            "effective_combined_rate": _wa_cr,
+            "effective_net_rate":      _wa_net_rate,
+        }
 
         # ── Summary card ──────────────────────────────────────────────────
         if not _wa_selected:
@@ -874,7 +1160,6 @@ with tab_wa:
             st.divider()
             st.markdown("**Your week at a glance**")
 
-            # Shift date list
             _wa_date_str = "  ·  ".join(
                 d.strftime("%a %-d %b") for d in sorted(_wa_selected)
             )
@@ -884,112 +1169,236 @@ with tab_wa:
                 f"**{_wa_week_end.strftime('%-d %b %Y')}**"
             )
 
-            # Pre-compute values used across metrics + captions
             _wa_total_hours = _wa_sum.get(
                 "total_hours",
                 round(_wa_sum["total_shifts"] * hours_per_shift, 2)
             )
-            _wa_gross       = _wa_sum["gross_income"]
-            _wa_n_shifts    = _wa_sum["total_shifts"]
-            _wa_has_adj     = has_adjustments(_wa_pc_items) if _wa_pc_items else False
+            _wa_gross    = _wa_sum["gross_income"]
+            _wa_n_shifts = _wa_sum["total_shifts"]
 
-            # Derive rates
-            _wa_net_rate  = (_wa_pc_rates or {}).get("effective_net_rate") or 0.0
-            _wa_tax_rate  = (_wa_pc_tax_rates or _wa_pc_rates or {}).get("effective_tax_rate") or 0.0
-            _wa_help_rate = (_wa_pc_tax_rates or _wa_pc_rates or {}).get("effective_help_rate") or 0.0
-            _wa_cr        = (_wa_pc_tax_rates or {}).get("effective_combined_rate") or 0.0
+            # Dollar estimates — always available
+            _wa_tax_est      = round(_wa_gross * _wa_tax_rate,  2)
+            _wa_help_est     = round(_wa_gross * _wa_help_rate, 2)
+            _wa_combined_est = round(_wa_gross * _wa_cr,        2)
+            _wa_net_est      = round(_wa_gross * _wa_net_rate,  2)
+            _wa_per_shift    = round(_wa_net_est / _wa_n_shifts, 2) if _wa_n_shifts > 0 else 0.0
 
-            # Compute dollar amounts
-            _wa_net_est       = round(_wa_gross * _wa_net_rate, 2)  if _wa_net_rate  else 0.0
-            _wa_tax_est       = round(_wa_gross * _wa_tax_rate, 2)  if _wa_tax_rate  else 0.0
-            _wa_help_est      = round(_wa_gross * _wa_help_rate, 2) if _wa_help_rate else 0.0
-            _wa_combined_est  = round(_wa_gross * _wa_cr, 2)        if _wa_cr        else 0.0
-            _wa_net_per_shift = (
-                round(_wa_net_est / _wa_n_shifts, 2) if _wa_net_est and _wa_n_shifts > 0 else 0.0
+            # ── Metrics row ───────────────────────────────────────────────
+            _wm1, _wm2, _wm3, _wm4 = st.columns(4)
+            _wm1.metric("Shifts",          _wa_n_shifts)
+            _wm2.metric("Total Hours",     f"{_wa_total_hours:.1f} h")
+            _wm3.metric("Gross Pay",       f"${_wa_gross:,.2f}")
+            _wm4.metric("Est. Take-Home",  f"${_wa_net_est:,.2f}")
+
+            # ── Breakdown table ───────────────────────────────────────────
+            _wa_table = (
+                "| | Amount | Rate |\n"
+                "|:---|---:|---:|\n"
+                f"| Gross income | **${_wa_gross:,.2f}** | — |\n"
+                f"| Income tax (est.) | −${_wa_tax_est:,.2f} | {_wa_tax_rate*100:.2f}% |\n"
+                f"| HELP withheld (est.) | −${_wa_help_est:,.2f} | {_wa_help_rate*100:.2f}% |\n"
+                f"| Total withheld (est.) | −${_wa_combined_est:,.2f} | {_wa_cr*100:.2f}% |\n"
+                f"| **Estimated take-home** | **${_wa_net_est:,.2f}** | {_wa_net_rate*100:.2f}% |\n"
+                f"| Take-home per shift | **${_wa_per_shift:,.2f}** | — |"
+            )
+            st.markdown(_wa_table)
+
+            st.caption(
+                "Estimate only. Based on your previous payslip withholding pattern. "
+                "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
+                "and employer payroll rules."
             )
 
-            # ── Metrics (4 columns) ───────────────────────────────────────
-            _wm1, _wm2, _wm3, _wm4 = st.columns(4)
-            _wm1.metric("Shifts",       _wa_n_shifts)
-            _wm2.metric("Total Hours",  f"{_wa_total_hours:.1f} h")
-            _wm3.metric("Gross (est.)", f"${_wa_gross:,.2f}")
-
-            if _wa_net_rate > 0:
-                _wm4.metric("Est. Take-Home", f"${_wa_net_est:,.2f}")
-            elif _wa_cr > 0:
-                _wm4.metric("Est. Withheld", f"−${_wa_combined_est:,.2f}")
-
-            # ── Detail caption ────────────────────────────────────────────
-            if _wa_net_rate > 0:
-                # Full calibration available — show breakdown
-                _wa_detail_parts = []
-                if _wa_tax_rate > 0:
-                    _wa_detail_parts.append(
-                        f"Tax withheld (est.): −\\${_wa_tax_est:,.2f} ({_wa_tax_rate*100:.1f}%)"
-                    )
-                if _wa_help_rate > 0:
-                    _wa_detail_parts.append(
-                        f"HELP withheld (est.): −\\${_wa_help_est:,.2f} ({_wa_help_rate*100:.1f}%)"
-                    )
-                if not _wa_detail_parts and _wa_cr > 0:
-                    _wa_detail_parts.append(
-                        f"Tax & HELP withheld (est.): −\\${_wa_combined_est:,.2f} ({_wa_cr*100:.1f}%)"
-                    )
-                _wa_detail_parts.append(
-                    f"Take-home/shift: \\${_wa_net_per_shift:,.2f}"
-                )
-                st.caption("  ·  ".join(_wa_detail_parts))
-                if _wa_has_adj:
-                    st.warning(
-                        "⚠️ Your calibration includes previous-period adjustments — "
-                        "this estimate may vary from a normal week."
-                    )
-            elif _wa_cr > 0:
-                # Items entered but no net pay yet
+            # ── Pay assumptions expander ──────────────────────────────────
+            with st.expander("My pay rates", expanded=False):
                 st.caption(
-                    f"Tax & HELP withheld (est.): −\\${_wa_combined_est:,.2f} "
-                    f"({_wa_cr*100:.1f}%)  ·  "
-                    "Enter your net pay in **🧾 Payslip Calibration → Calculate** "
-                    "to unlock take-home estimate."
+                    f"Default rates are derived from your previous payslip "
+                    f"(gross \\$1,529.48 · tax \\$313.00 · HELP \\$38.00 · net \\$1,178.48). "
+                    f"Adjust below if your withholding has changed. "
+                    f"Combined withheld and take-home rates are calculated automatically."
+                )
+                _pa_col1, _pa_col2 = st.columns(2)
+                with _pa_col1:
+                    _pa_new_tax = st.number_input(
+                        "Income tax rate (%)",
+                        min_value=0.0,
+                        max_value=60.0,
+                        value=st.session_state.wa_tax_rate_pct,
+                        step=0.01,
+                        format="%.4f",
+                        key="wa_tax_rate_input",
+                        help="Marginal tax withheld as a % of gross. Adjust if your tax bracket changes.",
+                    )
+                with _pa_col2:
+                    _pa_new_help = st.number_input(
+                        "HELP rate (%)",
+                        min_value=0.0,
+                        max_value=20.0,
+                        value=st.session_state.wa_help_rate_pct,
+                        step=0.01,
+                        format="%.4f",
+                        key="wa_help_rate_input",
+                        help="HELP/HECS withheld as a % of gross. Set to 0 if you have no HELP debt.",
+                    )
+                _pa_derived_combined = _pa_new_tax + _pa_new_help
+                _pa_derived_net      = 100.0 - _pa_derived_combined
+                st.caption(
+                    f"Combined withheld: **{_pa_derived_combined:.2f}%**  ·  "
+                    f"Take-home: **{_pa_derived_net:.2f}%**"
+                )
+                if st.button("✅ Apply", key="wa_apply_rates"):
+                    st.session_state.wa_tax_rate_pct  = _pa_new_tax
+                    st.session_state.wa_help_rate_pct = _pa_new_help
+                    st.rerun()
+                if st.button("↩ Reset to payslip defaults", key="wa_reset_rates"):
+                    st.session_state.wa_tax_rate_pct  = round(_WA_DEFAULT_TAX_RATE  * 100, 4)
+                    st.session_state.wa_help_rate_pct = round(_WA_DEFAULT_HELP_RATE * 100, 4)
+                    st.rerun()
+
+            # ── Projected Payslip Estimate expander ───────────────────────
+            with st.expander("📄 Projected Payslip Estimate", expanded=False):
+
+                # In-app preview
+                _pp_week_range = (
+                    f"{_wa_week_start.strftime('Sun %-d %b %Y')} — "
+                    f"{_wa_week_end.strftime('Sat %-d %b %Y')}"
+                )
+                st.markdown(f"**Projected Payslip Estimate** — {_pp_week_range}")
+
+                # Earnings
+                st.markdown("**Earnings**")
+                st.markdown(
+                    "| Description | Hours | Rate ($/hr) | Amount ($) |\n"
+                    "|:---|---:|---:|---:|\n"
+                    f"| Night Shift / Casual | {_wa_total_hours:.2f} h"
+                    f" | ${hourly_rate:,.2f} | ${_wa_gross:,.2f} |"
+                )
+
+                # Withholding
+                st.markdown("**Withholding (estimated)**")
+                st.markdown(
+                    "| Description | Rate (%) | Amount ($) |\n"
+                    "|:---|---:|---:|\n"
+                    f"| Income tax (est.) | {_wa_tax_rate*100:.2f}% | −${_wa_tax_est:,.2f} |\n"
+                    f"| HELP withheld (est.) | {_wa_help_rate*100:.2f}% | −${_wa_help_est:,.2f} |\n"
+                    f"| **Total withheld (est.)** | **{_wa_cr*100:.2f}%** | **−${_wa_combined_est:,.2f}** |"
+                )
+
+                # Summary
+                st.markdown("**Summary**")
+                st.markdown(
+                    "| | Amount ($) | Rate (%) |\n"
+                    "|:---|---:|---:|\n"
+                    f"| Gross income | ${_wa_gross:,.2f} | — |\n"
+                    f"| Total withheld (est.) | −${_wa_combined_est:,.2f} | {_wa_cr*100:.2f}% |\n"
+                    f"| **Estimated take-home** | **${_wa_net_est:,.2f}** | **{_wa_net_rate*100:.2f}%** |\n"
+                    f"| Take-home per shift | ${_wa_per_shift:,.2f} | — |"
+                )
+
+                # Shift dates
+                st.markdown("**Shift dates**")
+                _pp_dates_md = (
+                    "| Day | Date | Hours | Rate ($/hr) |\n"
+                    "|:---|:---|---:|---:|\n"
+                )
+                for _ppd in sorted(_wa_selected):
+                    _pp_dates_md += (
+                        f"| {_ppd.strftime('%A')} | {_ppd.strftime('%-d %b %Y')}"
+                        f" | {hours_per_shift:.2f} h | ${hourly_rate:,.2f} |\n"
+                    )
+                st.markdown(_pp_dates_md)
+
+                st.caption(
+                    "Estimate only. Based on your previous payslip withholding pattern. "
+                    "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
+                    "and employer payroll rules."
+                )
+
+                st.divider()
+
+                # Excel download
+                _pp_buf = build_projected_payslip_xlsx(
+                    week_start=_wa_week_start,
+                    week_end=_wa_week_end,
+                    selected_dates=_wa_selected,
+                    n_shifts=_wa_n_shifts,
+                    total_hours=_wa_total_hours,
+                    hourly_rate=hourly_rate,
+                    hours_per_shift=hours_per_shift,
+                    gross=_wa_gross,
+                    tax_rate=_wa_tax_rate,
+                    tax_est=_wa_tax_est,
+                    help_rate=_wa_help_rate,
+                    help_est=_wa_help_est,
+                    combined_rate=_wa_cr,
+                    combined_est=_wa_combined_est,
+                    net_rate=_wa_net_rate,
+                    net_est=_wa_net_est,
+                    per_shift=_wa_per_shift,
+                )
+
+                if _pp_buf is None:
+                    st.warning(
+                        "⚠️ openpyxl is not installed. "
+                        "Run: `pip install openpyxl` then restart the app."
+                    )
+                else:
+                    _pp_filename = (
+                        f"projected_payslip_{_wa_week_start.isoformat()}.xlsx"
+                    )
+                    st.download_button(
+                        label="⬇️ Download Projected Payslip Estimate (.xlsx)",
+                        data=_pp_buf,
+                        file_name=_pp_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="wa_download_payslip",
+                    )
+
+            # ── Saved / unsaved state ─────────────────────────────────────
+            _wa_selected_isos = {d.isoformat() for d in _wa_selected}
+            _wa_is_saved = (
+                _wa_existing is not None
+                and _wa_selected_isos == _wa_existing_isos
+                and bool(_wa_selected_isos)
+            )
+            _wa_has_changes = not _wa_is_saved and bool(_wa_selected_isos)
+
+            if _wa_is_saved:
+                _wa_saved_ts = _wa_existing.get("created_at", "")
+                st.success(
+                    f"✅ This week is saved"
+                    + (f"  ·  {_wa_saved_ts}" if _wa_saved_ts else "")
                 )
             else:
-                st.caption(
-                    "Add your payslip in **🧾 Payslip Calibration** "
-                    "to estimate tax/HELP and take-home pay."
-                )
-
-            # Save button
-            if _wa_existing:
-                st.caption(
-                    f"⚠️ Roster already saved ({_wa_existing['created_at']}). "
-                    "Saving will overwrite."
-                )
-            if st.button("💾 Save Weekly Roster", key="wa_save_btn"):
-                _iso_list = [d.isoformat() for d in _wa_selected]
-                save_weekly_roster(
-                    week_start_date=_wa_week_key,
-                    week_end_date=_wa_week_end.isoformat(),
-                    scheduled_dates=_iso_list,
-                    source="manual",
-                )
-                st.session_state.weekly_entry = {
-                    "week_start": _wa_week_key,
-                    "week_end":   _wa_week_end.isoformat(),
-                    "dates":      _iso_list,
-                    "summary":    _wa_sum,
-                }
-                st.success(
-                    f"✅ Saved {_wa_sum['total_shifts']} shifts "
-                    f"for {week_label(_wa_week_start)}."
-                )
-                st.rerun()
+                if _wa_has_changes:
+                    if _wa_existing:
+                        st.warning("⚠️ Unsaved changes — previous save will be overwritten.")
+                    if st.button("💾 Save Weekly Roster", key="wa_save_btn"):
+                        _iso_list = [d.isoformat() for d in _wa_selected]
+                        save_weekly_roster(
+                            week_start_date=_wa_week_key,
+                            week_end_date=_wa_week_end.isoformat(),
+                            scheduled_dates=_iso_list,
+                            source="manual",
+                        )
+                        st.session_state.weekly_entry = {
+                            "week_start": _wa_week_key,
+                            "week_end":   _wa_week_end.isoformat(),
+                            "dates":      _iso_list,
+                            "summary":    _wa_sum,
+                        }
+                        st.success(
+                            f"✅ Saved {_wa_sum['total_shifts']} shifts "
+                            f"for {week_label(_wa_week_start)}."
+                        )
+                        st.rerun()
 
         st.divider()
 
         # ── Weekly chat ───────────────────────────────────────────────────
         st.subheader("Ask about this week")
         st.caption(
-            "Skip a shift  ·  Add a shift  ·  Projected payslip  ·  Income goals  ·  Savings"
+            "Try: What if I add Saturday?  ·  What if I skip Tuesday?  ·  What is my projected payslip?"
         )
 
         for _msg in st.session_state.weekly_assistant_chat:
@@ -1023,10 +1432,10 @@ with tab_wa:
                     _wa_det_type, _wa_det_val,
                     _wa_ctx_dates,
                     hourly_rate, hours_per_shift,
-                    _wa_pc_rates,
+                    _wa_rates_dict,
                     week_label(_wa_week_start),
-                    pc_tax_rates=_wa_pc_tax_rates,
-                    has_adj=has_adjustments(_wa_pc_items) if _wa_pc_items else False,
+                    pc_tax_rates=_wa_rates_dict,
+                    has_adj=False,
                 )
                 if _wa_det_reply is not None:
                     st.session_state.weekly_assistant_chat.append(
@@ -1065,28 +1474,25 @@ with tab_wa:
             else:
                 _wa_sys += "No shifts entered for this week.\n"
 
-            if _wa_pc_rates and _wa_ctx_sum and _wa_pc_rates.get("effective_net_rate"):
-                _r   = _wa_pc_rates["effective_net_rate"]
+            if _wa_rates_dict and _wa_ctx_sum and _wa_rates_dict.get("effective_net_rate"):
+                _r   = _wa_rates_dict["effective_net_rate"]
                 _ctx_gross = _wa_ctx_sum["gross_income"]
                 _wa_sys += (
-                    f"Payslip calibration — "
+                    f"Withholding rates — "
                     f"net rate: {_r*100:.1f}%, "
-                    f"tax rate: {(_wa_pc_tax_rates or {}).get('effective_tax_rate', 0)*100:.1f}%, "
-                    f"HELP rate: {(_wa_pc_tax_rates or {}).get('effective_help_rate', 0)*100:.1f}%\n"
+                    f"tax rate: {_wa_rates_dict.get('effective_tax_rate', 0)*100:.1f}%, "
+                    f"HELP rate: {_wa_rates_dict.get('effective_help_rate', 0)*100:.1f}%\n"
                     f"Est. take-home this week: ${round(_ctx_gross * _r, 2):,.2f}\n"
                     f"Est. take-home/shift: "
                     f"${round(_ctx_gross * _r / _wa_ctx_sum['total_shifts'], 2) if _wa_ctx_sum['total_shifts'] > 0 else 0:,.2f}\n"
                 )
-                if has_adjustments(_wa_pc_items):
-                    _wa_sys += "Note: calibration includes previous-period adjustments.\n"
-            elif _wa_pc_tax_rates and _wa_pc_tax_rates.get("effective_combined_rate"):
-                _cr = _wa_pc_tax_rates["effective_combined_rate"]
+            elif _wa_rates_dict and _wa_rates_dict.get("effective_combined_rate"):
+                _cr = _wa_rates_dict["effective_combined_rate"]
                 _wa_sys += (
-                    f"Est. tax & HELP rate: {_cr*100:.1f}% "
-                    "(take-home not yet calibrated — net pay not entered)\n"
+                    f"Est. tax & HELP rate: {_cr*100:.1f}%\n"
                 )
             else:
-                _wa_sys += "No payslip calibration available.\n"
+                _wa_sys += "No withholding rates available.\n"
 
             _wa_sys += (
                 "\nCritical rules:\n"
@@ -1212,7 +1618,7 @@ if show_legacy:
             st.caption(
                 f"Based on: \\${hourly_rate}/hr × {hours_per_shift} hrs/shift. "
                 "Gross income estimate only — does not include tax or HELP withholding. "
-                "Use **🧾 Payslip Calibration** to see estimated take-home."
+                "Adjust **My pay rates** in 🗓 Weekly Assistant if your withholding rates have changed."
             )
 
             # Shift date list
@@ -2337,9 +2743,11 @@ if show_legacy:
 
 
 # ---------------------------------------------------------------------------
-# Tab: Payslip Calibration (main)
+# Tab: Payslip Calibration (legacy — only rendered when Advanced / Legacy Tools is ON)
+# When show_legacy is OFF, calibration UI lives inside the Weekly Assistant expander.
 # ---------------------------------------------------------------------------
-with tab_pc:
+if show_legacy:
+ with tab_pc:
     import datetime as _dt_ps
     import pandas as _pd_ps
 
@@ -2525,6 +2933,10 @@ with tab_pc:
         # Store entered net pay so Weekly Assistant can use the effective net rate
         st.session_state.wa_entered_net = _ps_entered_net
 
+        # Build a human-readable label for this calibration snapshot
+        from datetime import datetime as _dt
+        _cal_label = f"Saved {_dt.now().strftime('%-d %b %Y at %-I:%M %p')}"
+
         # Derive totals
         _cp_gross  = current_period_gross(_items)
         _adj_gross = adjustment_gross(_items)
@@ -2540,11 +2952,27 @@ with tab_pc:
         _recon     = pc_reconcile(_items, _ps_entered_net)
         _hr        = derived_hourly_rate(_items)
 
+        # Persist calibration to SQLite and update session labels
+        _cal_saved_at = None
+        if _rates and (_ps_entered_net > 0 or _rates.get("effective_tax_rate")):
+            _cal_row_id = save_payslip_calibration(
+                label=_cal_label,
+                lines=st.session_state.payslip_lines,
+                entered_net=_ps_entered_net,
+                rates_dict=_rates,
+            )
+            from datetime import datetime as _dt2
+            _cal_saved_at = _dt2.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state.wa_calibration_loaded_id = _cal_row_id
+            st.session_state.wa_calibration_label     = _cal_label
+            st.session_state.wa_calibration_saved_at  = _cal_saved_at
+
         # Confirm rates saved to Weekly Assistant
         if _ps_entered_net > 0 and _rates.get("effective_net_rate"):
             _saved_net_pct = round(_rates["effective_net_rate"] * 100, 1)
+            _save_ts = f"  ·  Saved {_cal_saved_at}" if _cal_saved_at else ""
             st.success(
-                f"✅ Rates saved — effective net rate **{_saved_net_pct}%**. "
+                f"✅ Rates saved — effective net rate **{_saved_net_pct}%**{_save_ts}. "
                 "Go to **🗓 Weekly Assistant** to see your estimated take-home."
             )
 
