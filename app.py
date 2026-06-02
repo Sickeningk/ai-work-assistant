@@ -323,6 +323,17 @@ def detect_wa_question(question: str, week_dates_list: list):
     if re.search(r'\b(payslip|pay slip|pay breakdown|breakdown|projected pay)\b', q):
         return ("projected_payslip", None)
 
+    # --- Simple take-home question ----------------------------------------
+    # "How much will I take home?" / "What's my take-home?" / "How much net pay?"
+    # Guard: must NOT also be asking "how many shifts" or contain a dollar target
+    # (those are handled by shifts_for_takehome above)
+    if re.search(
+        r'\b(take.?home|take home|net pay|how much.*pay|what.*take.?home|'
+        r'how much.*take|my take.?home|estimated take.?home)\b', q
+    ):
+        if not re.search(r'\b(how many|shifts|need)\b', q) and not re.search(r'\$[\d,]+|[\d,]{3,}', q):
+            return ("current_takehome", None)
+
     # --- Can I afford X ---------------------------------------------------
     afford_m = re.search(r'\bafford\b.*?\$?([\d,]+)', q)
     if not afford_m:
@@ -564,6 +575,37 @@ def format_wa_answer(
                 "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
                 "and employer payroll rules.*"
             )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    if q_type == "current_takehome":
+        if not selected_dates:
+            return "Enter your shifts first so I can estimate your take-home."
+        s = _sum(selected_dates)
+        gross = s["gross_income"]
+        n = s["total_shifts"]
+        if not net_rate or net_rate <= 0:
+            return (
+                f"Your estimated gross this week is **\\${gross:,.2f}**.\n\n"
+                "⚠️ No withholding rates found — take-home estimate unavailable. "
+                "Adjust **My pay rates** below."
+            )
+        # Use the same rounding approach as the summary table
+        _th_tax  = round(gross * (tax_rate or 0), 2)
+        _th_help = round(gross * (help_rate or 0), 2)
+        _th_withheld = _th_tax + _th_help
+        _th_net  = round(gross - _th_withheld, 2)
+        _th_per  = round(_th_net / n, 2) if n > 0 else 0.0
+        lines = [
+            f"Your estimated take-home this week is **\\${_th_net:,.2f}**.",
+            "",
+            f"- Gross pay: \\${gross:,.2f}",
+            f"- Income tax & HELP withheld: −\\${_th_withheld:,.2f}",
+            f"- **Est. take-home: \\${_th_net:,.2f}**",
+            f"- Take-home per shift: \\${_th_per:,.2f}",
+            "",
+            "*Projected pay estimate based on previous payslip withholding pattern.*",
+        ]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -994,6 +1036,7 @@ def build_projected_payslip_xlsx(
 # Tab layout — 2 main tabs by default; legacy tools (inc. Payslip Calibration tab) shown when toggled
 # ---------------------------------------------------------------------------
 if show_legacy:
+    # Admin + legacy: all tabs visible
     tab_wa, tab_tw, tab_pc, tab_we, tab1, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "💰 Payslip Projector",
         "📊 This Week",
@@ -1006,10 +1049,16 @@ if show_legacy:
         "📥 Export",
         "💰 Casual Pay Estimator",
     ])
-else:
+elif _ADMIN_MODE:
+    # Admin mode (no legacy): show Payslip Projector + This Week
     tab_wa, tab_tw = st.tabs([
         "💰 Payslip Projector",
         "📊 This Week",
+    ])
+else:
+    # Employee mode: single tab only
+    (tab_wa,) = st.tabs([
+        "💰 Payslip Projector",
     ])
 
 
@@ -1020,6 +1069,7 @@ with tab_wa:
     import datetime as _dt_wa
 
     st.header("💰 Payslip Projector")
+    st.caption("Enter your shifts below to see your estimated pay for the week.")
 
     # ── Week selector ──────────────────────────────────────────────────────
     _wa_default_sunday = current_week_sunday(_dt_wa.date.today())
@@ -1176,11 +1226,12 @@ with tab_wa:
             _wa_gross    = _wa_sum["gross_income"]
             _wa_n_shifts = _wa_sum["total_shifts"]
 
-            # Dollar estimates — always available
+            # Dollar estimates — combined and net derived from rounded lines
+            # so the visible table is always internally consistent (no 1-cent drift)
             _wa_tax_est      = round(_wa_gross * _wa_tax_rate,  2)
             _wa_help_est     = round(_wa_gross * _wa_help_rate, 2)
-            _wa_combined_est = round(_wa_gross * _wa_cr,        2)
-            _wa_net_est      = round(_wa_gross * _wa_net_rate,  2)
+            _wa_combined_est = _wa_tax_est + _wa_help_est               # sum of displayed lines
+            _wa_net_est      = round(_wa_gross - _wa_combined_est, 2)   # gross − displayed total
             _wa_per_shift    = round(_wa_net_est / _wa_n_shifts, 2) if _wa_n_shifts > 0 else 0.0
 
             # ── Metrics row ───────────────────────────────────────────────
@@ -1209,51 +1260,58 @@ with tab_wa:
                 "and employer payroll rules."
             )
 
-            # ── Pay assumptions expander ──────────────────────────────────
-            with st.expander("My pay rates", expanded=False):
-                st.caption(
-                    f"Default rates are derived from your previous payslip "
-                    f"(gross \\$1,529.48 · tax \\$313.00 · HELP \\$38.00 · net \\$1,178.48). "
-                    f"Adjust below if your withholding has changed. "
-                    f"Combined withheld and take-home rates are calculated automatically."
-                )
-                _pa_col1, _pa_col2 = st.columns(2)
-                with _pa_col1:
-                    _pa_new_tax = st.number_input(
-                        "Income tax rate (%)",
-                        min_value=0.0,
-                        max_value=60.0,
-                        value=st.session_state.wa_tax_rate_pct,
-                        step=0.01,
-                        format="%.4f",
-                        key="wa_tax_rate_input",
-                        help="Marginal tax withheld as a % of gross. Adjust if your tax bracket changes.",
+            # ── Pay rates — admin: editable expander / employee: read-only caption
+            if _ADMIN_MODE:
+                with st.expander("My pay rates", expanded=False):
+                    st.caption(
+                        f"Default rates are derived from your previous payslip "
+                        f"(gross \\$1,529.48 · tax \\$313.00 · HELP \\$38.00 · net \\$1,178.48). "
+                        f"Adjust below if your withholding has changed. "
+                        f"Combined withheld and take-home rates are calculated automatically."
                     )
-                with _pa_col2:
-                    _pa_new_help = st.number_input(
-                        "HELP rate (%)",
-                        min_value=0.0,
-                        max_value=20.0,
-                        value=st.session_state.wa_help_rate_pct,
-                        step=0.01,
-                        format="%.4f",
-                        key="wa_help_rate_input",
-                        help="HELP/HECS withheld as a % of gross. Set to 0 if you have no HELP debt.",
+                    _pa_col1, _pa_col2 = st.columns(2)
+                    with _pa_col1:
+                        _pa_new_tax = st.number_input(
+                            "Income tax rate (%)",
+                            min_value=0.0,
+                            max_value=60.0,
+                            value=st.session_state.wa_tax_rate_pct,
+                            step=0.01,
+                            format="%.4f",
+                            key="wa_tax_rate_input",
+                            help="Income tax withheld as a % of gross. Adjust if your tax bracket changes.",
+                        )
+                    with _pa_col2:
+                        _pa_new_help = st.number_input(
+                            "HELP rate (%)",
+                            min_value=0.0,
+                            max_value=20.0,
+                            value=st.session_state.wa_help_rate_pct,
+                            step=0.01,
+                            format="%.4f",
+                            key="wa_help_rate_input",
+                            help="HELP/HECS withheld as a % of gross. Set to 0 if you have no HELP debt.",
+                        )
+                    _pa_derived_combined = _pa_new_tax + _pa_new_help
+                    _pa_derived_net      = 100.0 - _pa_derived_combined
+                    st.caption(
+                        f"Combined withheld: **{_pa_derived_combined:.2f}%**  ·  "
+                        f"Take-home: **{_pa_derived_net:.2f}%**"
                     )
-                _pa_derived_combined = _pa_new_tax + _pa_new_help
-                _pa_derived_net      = 100.0 - _pa_derived_combined
+                    if st.button("✅ Apply", key="wa_apply_rates"):
+                        st.session_state.wa_tax_rate_pct  = _pa_new_tax
+                        st.session_state.wa_help_rate_pct = _pa_new_help
+                        st.rerun()
+                    if st.button("↩ Reset to payslip defaults", key="wa_reset_rates"):
+                        st.session_state.wa_tax_rate_pct  = round(_WA_DEFAULT_TAX_RATE  * 100, 4)
+                        st.session_state.wa_help_rate_pct = round(_WA_DEFAULT_HELP_RATE * 100, 4)
+                        st.rerun()
+            else:
                 st.caption(
-                    f"Combined withheld: **{_pa_derived_combined:.2f}%**  ·  "
-                    f"Take-home: **{_pa_derived_net:.2f}%**"
+                    f"Rates based on your previous payslip withholding pattern "
+                    f"(income tax {st.session_state.wa_tax_rate_pct:.2f}% · "
+                    f"HELP {st.session_state.wa_help_rate_pct:.2f}%)."
                 )
-                if st.button("✅ Apply", key="wa_apply_rates"):
-                    st.session_state.wa_tax_rate_pct  = _pa_new_tax
-                    st.session_state.wa_help_rate_pct = _pa_new_help
-                    st.rerun()
-                if st.button("↩ Reset to payslip defaults", key="wa_reset_rates"):
-                    st.session_state.wa_tax_rate_pct  = round(_WA_DEFAULT_TAX_RATE  * 100, 4)
-                    st.session_state.wa_help_rate_pct = round(_WA_DEFAULT_HELP_RATE * 100, 4)
-                    st.rerun()
 
             # ── Projected Payslip Estimate expander ───────────────────────
             with st.expander("📄 Projected Payslip Estimate", expanded=False):
@@ -1810,7 +1868,8 @@ if show_legacy:
         st.info("Upload a roster screenshot to begin.")
 
 
-with tab_tw:
+if _ADMIN_MODE or show_legacy:
+ with tab_tw:
 
     st.header("📊 This Week")
 
