@@ -790,6 +790,10 @@ if "wa_tax_rate_pct" not in st.session_state:
     st.session_state.wa_tax_rate_pct  = round(_WA_DEFAULT_TAX_RATE  * 100, 4)
 if "wa_help_rate_pct" not in st.session_state:
     st.session_state.wa_help_rate_pct = round(_WA_DEFAULT_HELP_RATE * 100, 4)
+if "wa_hourly_rate" not in st.session_state:
+    st.session_state.wa_hourly_rate     = float(saved_hourly_rate)
+if "wa_hours_per_shift" not in st.session_state:
+    st.session_state.wa_hours_per_shift = float(saved_hours_per_shift)
 
 # ID of the calibration row that was auto-loaded from DB this session (None = not loaded / freshly calculated)
 if "wa_calibration_loaded_id" not in st.session_state:
@@ -1063,527 +1067,522 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Tab: Weekly Assistant (main)
+# Tab: Weekly Assistant (main)  — Phase 36 Calendar UI
 # ---------------------------------------------------------------------------
 with tab_wa:
     import datetime as _dt_wa
 
-    st.header("💰 Payslip Projector")
-    st.caption("Enter your shifts below to see your estimated pay for the week.")
+    # ── Page header ────────────────────────────────────────────────────────
+    st.markdown(
+        "<h2 style='margin-bottom:0'>Payslip Projector</h2>"
+        "<p style='color:#6b7280;margin-top:4px;font-size:1rem'>"
+        "Select your work days and estimate your weekly pay before payday.</p>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
 
-    # ── Week selector ──────────────────────────────────────────────────────
-    _wa_default_sunday = current_week_sunday(_dt_wa.date.today())
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 1 — Choose your pay week
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("### 1. Choose your pay week")
 
-    if _ADMIN_MODE:
-        _wa_col_left, _wa_col_right = st.columns([2, 5])
-        with _wa_col_left:
-            _wa_week_start = st.date_input(
-                "Week starting (Sunday)",
-                value=_wa_default_sunday,
-                key="wa_week_start",
+    _wa_col_picker, _wa_col_range = st.columns([2, 3])
+    with _wa_col_picker:
+        _wa_week_start = st.date_input(
+            "Week start date",
+            value=current_week_sunday(_dt_wa.date.today()),
+            key="wa_week_start",
+            help="Choose the first day of your pay week.",
+        )
+    with _wa_col_range:
+        _wa_week_end_disp = _wa_week_start + _dt_wa.timedelta(days=6)
+        st.markdown(
+            f"<div style='padding-top:30px;color:#374151;font-size:1rem'>"
+            f"📅 <b>Pay week:</b> "
+            f"{_wa_week_start.strftime('%-d %b')} – "
+            f"{_wa_week_end_disp.strftime('%-d %b %Y')}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    _wa_week_end  = _wa_week_start + _dt_wa.timedelta(days=6)
+    _wa_all_dates = week_dates(_wa_week_start)
+    _wa_week_key  = _wa_week_start.isoformat()
+
+    # Detect week change → reset checkbox state
+    if st.session_state.wa_last_week_key != _wa_week_key:
+        for _d in _wa_all_dates:
+            _k = f"wa_day_{_d.isoformat()}"
+            if _k in st.session_state:
+                del st.session_state[_k]
+        if (
+            st.session_state.weekly_assistant_week_key is not None
+            and st.session_state.weekly_assistant_week_key != _wa_week_key
+            and st.session_state.weekly_assistant_chat
+        ):
+            st.warning("⚠️ Week changed. Earlier chat messages refer to a different week.")
+        st.session_state.wa_last_week_key = _wa_week_key
+    st.session_state.weekly_assistant_week_key = _wa_week_key
+
+    # Load saved roster for this week
+    _wa_existing      = load_weekly_roster_by_start(_wa_week_key)
+    _wa_existing_isos = set(_wa_existing["scheduled_dates"]) if _wa_existing else set()
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 2 — Select your shifts (day cards)
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("### 2. Select your shifts")
+    st.caption("Tap a day to add or remove it from your week.")
+
+    _wa_selected = []
+    _wa_card_cols = st.columns(7)
+
+    for _i, _d in enumerate(_wa_all_dates):
+        _iso     = _d.isoformat()
+        _default = st.session_state.get(f"wa_day_{_iso}", _iso in _wa_existing_isos)
+
+        with _wa_card_cols[_i]:
+            _checked = st.checkbox(
+                f"**{_d.strftime('%a')}**\n{_d.strftime('%-d %b')}",
+                value=_default,
+                key=f"wa_day_{_iso}",
             )
+            if _checked:
+                _wa_selected.append(_d)
+                # Highlight selected card
+                st.markdown(
+                    "<div style='margin-top:-8px;text-align:center;"
+                    "background:#eff6ff;border:2px solid #3b82f6;"
+                    "border-radius:8px;padding:4px 2px;"
+                    "font-size:0.75rem;color:#1d4ed8;font-weight:600'>"
+                    "✓ Selected</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    "<div style='margin-top:-8px;text-align:center;"
+                    "background:#f9fafb;border:1px solid #e5e7eb;"
+                    "border-radius:8px;padding:4px 2px;"
+                    "font-size:0.75rem;color:#9ca3af'>"
+                    "—</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 3 — Your selected shifts
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("### 3. Your selected shifts")
+
+    if not _wa_selected:
+        st.info("No shifts selected yet. Tap the day cards above to add shifts.")
     else:
-        _wa_week_start = _wa_default_sunday
-        _wa_week_end_disp = _wa_default_sunday + _dt_wa.timedelta(days=6)
+        _wa_date_str = "  ·  ".join(d.strftime("%a %-d %b") for d in sorted(_wa_selected))
+        st.markdown(
+            f"<div style='background:#f0fdf4;border:1px solid #86efac;"
+            f"border-radius:10px;padding:14px 18px;font-size:1rem;color:#166534'>"
+            f"📅 <b>{_wa_date_str}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
         st.caption(
-            f"Pay week: **{_wa_default_sunday.strftime('%-d %b')} "
-            f"– {_wa_week_end_disp.strftime('%-d %b %Y')}**"
-        )
-        with st.expander("Change week", expanded=False):
-            _wa_week_start = st.date_input(
-                "Week starting (Sunday)",
-                value=_wa_default_sunday,
-                key="wa_week_start",
-            )
-
-    if _wa_week_start.weekday() != 6:
-        st.warning(
-            f"⚠️ {_wa_week_start.strftime('%A %-d %b')} is not a Sunday. "
-            "Please select a Sunday as the week start."
-        )
-    else:
-        _wa_week_end  = _wa_week_start + _dt_wa.timedelta(days=6)
-        _wa_all_dates = week_dates(_wa_week_start)
-        _wa_week_key  = _wa_week_start.isoformat()
-
-        # ── Detect week change → reset NL sync state ──────────────────────
-        if st.session_state.wa_last_week_key != _wa_week_key:
-            st.session_state.wa_last_nl_parsed = ""
-            for _d in _wa_all_dates:
-                _k = f"wa_day_{_d.isoformat()}"
-                if _k in st.session_state:
-                    del st.session_state[_k]
-            if (
-                st.session_state.weekly_assistant_week_key is not None
-                and st.session_state.weekly_assistant_week_key != _wa_week_key
-                and st.session_state.weekly_assistant_chat
-            ):
-                st.warning(
-                    "⚠️ Week changed. Earlier chat messages refer to a different week."
-                )
-            st.session_state.wa_last_week_key = _wa_week_key
-        st.session_state.weekly_assistant_week_key = _wa_week_key
-
-        # ── Load saved roster for this week ───────────────────────────────
-        _wa_existing      = load_weekly_roster_by_start(_wa_week_key)
-        _wa_existing_isos = set(_wa_existing["scheduled_dates"]) if _wa_existing else set()
-
-        # ── Context-aware prompt heading ──────────────────────────────────
-        _today_wd = _dt_wa.date.today().weekday()  # Mon=0 … Sun=6
-        if _today_wd == 4:   # Friday — roster arrives
-            _wa_heading = "🗓 Roster day — what shifts did Amazon give you for next week?"
-        elif _today_wd == 6:  # Sunday — week starts today
-            _wa_heading = "🗓 New week — what shifts are you working this week?"
-        else:
-            _wa_heading = "🗓 What shifts are you working this week?"
-        st.markdown(f"#### {_wa_heading}")
-
-        _wa_nl = st.text_input(
-            "shifts_input",
-            placeholder="Mon Tue Fri  ·  Monday to Friday  ·  No shifts this week",
-            key="wa_nl_input",
-            label_visibility="collapsed",
+            f"{len(_wa_selected)} shift{'s' if len(_wa_selected) != 1 else ''}  ·  "
+            f"See pay estimate below."
         )
 
-        # ── Sync checkboxes when NL input changes ─────────────────────────
-        if _wa_nl != st.session_state.wa_last_nl_parsed:
-            if _wa_nl.strip():
-                _wa_p      = parse_shift_input(_wa_nl, _wa_all_dates)
-                _wa_p_isos = {d.isoformat() for d in _wa_p["selected_dates"]}
-                _wa_p_no   = _wa_p["no_shifts"]
-                if _wa_p["unrecognised"]:
-                    st.warning(
-                        f"⚠️ Unrecognised: {', '.join(_wa_p['unrecognised'])}"
-                    )
-                for _d in _wa_all_dates:
-                    st.session_state[f"wa_day_{_d.isoformat()}"] = (
-                        False if _wa_p_no else (_d.isoformat() in _wa_p_isos)
-                    )
-            else:
-                # NL cleared — restore from saved roster
-                for _d in _wa_all_dates:
-                    st.session_state[f"wa_day_{_d.isoformat()}"] = (
-                        _d.isoformat() in _wa_existing_isos
-                    )
-            st.session_state.wa_last_nl_parsed = _wa_nl
+        # Save / unsaved state
+        _wa_selected_isos = {d.isoformat() for d in _wa_selected}
+        _wa_is_saved = (
+            _wa_existing is not None
+            and _wa_selected_isos == _wa_existing_isos
+            and bool(_wa_selected_isos)
+        )
+        _wa_has_changes = not _wa_is_saved and bool(_wa_selected_isos)
 
-        # ── Fine-tune expander with checkboxes ────────────────────────────
-        with st.expander("Change my shifts", expanded=False):
-            st.caption("Tick to adjust individual days. Overrides the text input above.")
-            _wa_selected = []
-            _wa_chk_cols = st.columns(7)
-            for _i, _d in enumerate(_wa_all_dates):
-                _iso     = _d.isoformat()
-                _default = st.session_state.get(f"wa_day_{_iso}", _iso in _wa_existing_isos)
-                _checked = _wa_chk_cols[_i].checkbox(
-                    day_label(_d), value=_default, key=f"wa_day_{_iso}"
-                )
-                if _checked:
-                    _wa_selected.append(_d)
-
-        # ── Withholding rates from session state (user-adjustable) ──────────
-        _wa_tax_rate  = st.session_state.wa_tax_rate_pct  / 100.0
-        _wa_help_rate = st.session_state.wa_help_rate_pct / 100.0
-        _wa_cr        = _wa_tax_rate + _wa_help_rate          # combined, derived
-        _wa_net_rate  = 1.0 - _wa_cr                          # take-home, derived
-
-        # Build a rates dict compatible with format_wa_answer
-        _wa_rates_dict = {
-            "effective_tax_rate":      _wa_tax_rate,
-            "effective_help_rate":     _wa_help_rate,
-            "effective_combined_rate": _wa_cr,
-            "effective_net_rate":      _wa_net_rate,
-        }
-
-        # ── Summary card ──────────────────────────────────────────────────
-        if not _wa_selected:
-            if not _wa_nl.strip() and not _wa_existing_isos:
-                st.caption(
-                    "Type your shifts above — e.g. **Mon Tue Fri** or **Monday to Friday** — "
-                    "to see your weekly summary."
-                )
-            else:
-                st.info("No shifts this week.")
-        else:
-            _wa_sum = weekly_summary(_wa_selected, hourly_rate, hours_per_shift, fuel_cost)
-
-            st.divider()
-            st.markdown("**Your week at a glance**")
-
-            _wa_date_str = "  ·  ".join(
-                d.strftime("%a %-d %b") for d in sorted(_wa_selected)
+        if _wa_is_saved:
+            _wa_saved_ts = _wa_existing.get("created_at", "")
+            st.success(
+                "✅ This week is saved"
+                + (f"  ·  {_wa_saved_ts}" if _wa_saved_ts else "")
             )
-            st.markdown(f"📅 {_wa_date_str}")
-            st.caption(
-                f"Week: **{_wa_week_start.strftime('%-d %b')}** – "
-                f"**{_wa_week_end.strftime('%-d %b %Y')}**"
-            )
-
-            _wa_total_hours = _wa_sum.get(
-                "total_hours",
-                round(_wa_sum["total_shifts"] * hours_per_shift, 2)
-            )
-            _wa_gross    = _wa_sum["gross_income"]
-            _wa_n_shifts = _wa_sum["total_shifts"]
-
-            # Dollar estimates — combined and net derived from rounded lines
-            # so the visible table is always internally consistent (no 1-cent drift)
-            _wa_tax_est      = round(_wa_gross * _wa_tax_rate,  2)
-            _wa_help_est     = round(_wa_gross * _wa_help_rate, 2)
-            _wa_combined_est = _wa_tax_est + _wa_help_est               # sum of displayed lines
-            _wa_net_est      = round(_wa_gross - _wa_combined_est, 2)   # gross − displayed total
-            _wa_per_shift    = round(_wa_net_est / _wa_n_shifts, 2) if _wa_n_shifts > 0 else 0.0
-
-            # ── Metrics row ───────────────────────────────────────────────
-            _wm1, _wm2, _wm3, _wm4 = st.columns(4)
-            _wm1.metric("Shifts",          _wa_n_shifts)
-            _wm2.metric("Total Hours",     f"{_wa_total_hours:.1f} h")
-            _wm3.metric("Gross Pay",       f"${_wa_gross:,.2f}")
-            _wm4.metric("Est. Take-Home",  f"${_wa_net_est:,.2f}")
-
-            # ── Breakdown table ───────────────────────────────────────────
-            _wa_table = (
-                "| | Amount | Rate |\n"
-                "|:---|---:|---:|\n"
-                f"| Gross income | **${_wa_gross:,.2f}** | — |\n"
-                f"| Income tax (est.) | −${_wa_tax_est:,.2f} | {_wa_tax_rate*100:.2f}% |\n"
-                f"| Student loan / HELP (est.) | −${_wa_help_est:,.2f} | {_wa_help_rate*100:.2f}% |\n"
-                f"| Total withheld (est.) | −${_wa_combined_est:,.2f} | {_wa_cr*100:.2f}% |\n"
-                f"| **Estimated take-home** | **${_wa_net_est:,.2f}** | {_wa_net_rate*100:.2f}% |\n"
-                f"| Take-home per shift | **${_wa_per_shift:,.2f}** | — |"
-            )
-            st.markdown(_wa_table)
-
-            st.caption(
-                "Estimate only. Based on your previous payslip withholding pattern. "
-                "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
-                "and employer payroll rules."
-            )
-
-            # ── Pay rates — admin: editable expander / employee: read-only caption
-            if _ADMIN_MODE:
-                with st.expander("My pay rates", expanded=False):
-                    st.caption(
-                        f"Default rates are derived from your previous payslip "
-                        f"(gross \\$1,529.48 · tax \\$313.00 · HELP \\$38.00 · net \\$1,178.48). "
-                        f"Adjust below if your withholding has changed. "
-                        f"Combined withheld and take-home rates are calculated automatically."
-                    )
-                    _pa_col1, _pa_col2 = st.columns(2)
-                    with _pa_col1:
-                        _pa_new_tax = st.number_input(
-                            "Income tax rate (%)",
-                            min_value=0.0,
-                            max_value=60.0,
-                            value=st.session_state.wa_tax_rate_pct,
-                            step=0.01,
-                            format="%.4f",
-                            key="wa_tax_rate_input",
-                            help="Income tax withheld as a % of gross. Adjust if your tax bracket changes.",
-                        )
-                    with _pa_col2:
-                        _pa_new_help = st.number_input(
-                            "HELP rate (%)",
-                            min_value=0.0,
-                            max_value=20.0,
-                            value=st.session_state.wa_help_rate_pct,
-                            step=0.01,
-                            format="%.4f",
-                            key="wa_help_rate_input",
-                            help="HELP/HECS withheld as a % of gross. Set to 0 if you have no HELP debt.",
-                        )
-                    _pa_derived_combined = _pa_new_tax + _pa_new_help
-                    _pa_derived_net      = 100.0 - _pa_derived_combined
-                    st.caption(
-                        f"Combined withheld: **{_pa_derived_combined:.2f}%**  ·  "
-                        f"Take-home: **{_pa_derived_net:.2f}%**"
-                    )
-                    if st.button("✅ Apply", key="wa_apply_rates"):
-                        st.session_state.wa_tax_rate_pct  = _pa_new_tax
-                        st.session_state.wa_help_rate_pct = _pa_new_help
-                        st.rerun()
-                    if st.button("↩ Reset to payslip defaults", key="wa_reset_rates"):
-                        st.session_state.wa_tax_rate_pct  = round(_WA_DEFAULT_TAX_RATE  * 100, 4)
-                        st.session_state.wa_help_rate_pct = round(_WA_DEFAULT_HELP_RATE * 100, 4)
-                        st.rerun()
-            else:
-                st.caption(
-                    f"Rates based on your previous payslip withholding pattern "
-                    f"(income tax {st.session_state.wa_tax_rate_pct:.1f}% · "
-                    f"student loan / HELP {st.session_state.wa_help_rate_pct:.1f}%)."
+        elif _wa_has_changes:
+            if _wa_existing:
+                st.warning("⚠️ Unsaved changes — previous save will be overwritten.")
+            if st.button("💾 Save Weekly Roster", key="wa_save_btn"):
+                _iso_list = [d.isoformat() for d in _wa_selected]
+                _wa_sum_save = weekly_summary(_wa_selected, st.session_state.wa_hourly_rate,
+                                              st.session_state.wa_hours_per_shift, fuel_cost)
+                save_weekly_roster(
+                    week_start_date=_wa_week_key,
+                    week_end_date=_wa_week_end.isoformat(),
+                    scheduled_dates=_iso_list,
+                    source="manual",
                 )
-
-            # ── Projected Payslip Estimate expander ───────────────────────
-            with st.expander("📄 Projected Payslip Estimate", expanded=False):
-
-                # In-app preview
-                _pp_week_range = (
-                    f"{_wa_week_start.strftime('Sun %-d %b %Y')} – "
-                    f"{_wa_week_end.strftime('Sat %-d %b %Y')}"
-                )
-                st.markdown(f"**Projected Payslip Estimate** — {_pp_week_range}")
-
-                # Earnings
-                st.markdown("**Earnings**")
-                st.markdown(
-                    "| Description | Hours | Rate ($/hr) | Amount ($) |\n"
-                    "|:---|---:|---:|---:|\n"
-                    f"| Night Shift / Casual | {_wa_total_hours:.2f} h"
-                    f" | ${hourly_rate:,.2f} | ${_wa_gross:,.2f} |"
-                )
-
-                # Withholding
-                st.markdown("**Withholding (estimated)**")
-                st.markdown(
-                    "| Description | Rate (%) | Amount ($) |\n"
-                    "|:---|---:|---:|\n"
-                    f"| Income tax (est.) | {_wa_tax_rate*100:.2f}% | −${_wa_tax_est:,.2f} |\n"
-                    f"| Student loan / HELP (est.) | {_wa_help_rate*100:.2f}% | −${_wa_help_est:,.2f} |\n"
-                    f"| **Total withheld (est.)** | **{_wa_cr*100:.2f}%** | **−${_wa_combined_est:,.2f}** |"
-                )
-
-                # Summary
-                st.markdown("**Summary**")
-                st.markdown(
-                    "| | Amount ($) | Rate (%) |\n"
-                    "|:---|---:|---:|\n"
-                    f"| Gross income | ${_wa_gross:,.2f} | — |\n"
-                    f"| Total withheld (est.) | −${_wa_combined_est:,.2f} | {_wa_cr*100:.2f}% |\n"
-                    f"| **Estimated take-home** | **${_wa_net_est:,.2f}** | **{_wa_net_rate*100:.2f}%** |\n"
-                    f"| Take-home per shift | ${_wa_per_shift:,.2f} | — |"
-                )
-
-                # Shift dates
-                st.markdown("**Shift dates**")
-                _pp_dates_md = (
-                    "| Day | Date | Hours | Rate ($/hr) |\n"
-                    "|:---|:---|---:|---:|\n"
-                )
-                for _ppd in sorted(_wa_selected):
-                    _pp_dates_md += (
-                        f"| {_ppd.strftime('%A')} | {_ppd.strftime('%-d %b %Y')}"
-                        f" | {hours_per_shift:.2f} h | ${hourly_rate:,.2f} |\n"
-                    )
-                st.markdown(_pp_dates_md)
-
-                st.caption(
-                    "Estimate only. Based on your previous payslip withholding pattern. "
-                    "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
-                    "and employer payroll rules."
-                )
-
-                st.divider()
-
-                # Excel download
-                _pp_buf = build_projected_payslip_xlsx(
-                    week_start=_wa_week_start,
-                    week_end=_wa_week_end,
-                    selected_dates=_wa_selected,
-                    n_shifts=_wa_n_shifts,
-                    total_hours=_wa_total_hours,
-                    hourly_rate=hourly_rate,
-                    hours_per_shift=hours_per_shift,
-                    gross=_wa_gross,
-                    tax_rate=_wa_tax_rate,
-                    tax_est=_wa_tax_est,
-                    help_rate=_wa_help_rate,
-                    help_est=_wa_help_est,
-                    combined_rate=_wa_cr,
-                    combined_est=_wa_combined_est,
-                    net_rate=_wa_net_rate,
-                    net_est=_wa_net_est,
-                    per_shift=_wa_per_shift,
-                )
-
-                if _pp_buf is None:
-                    st.warning(
-                        "⚠️ openpyxl is not installed. "
-                        "Run: `pip install openpyxl` then restart the app."
-                    )
-                else:
-                    _pp_filename = (
-                        f"projected_payslip_{_wa_week_start.isoformat()}.xlsx"
-                    )
-                    st.download_button(
-                        label="⬇️ Download Projected Payslip Estimate (.xlsx)",
-                        data=_pp_buf,
-                        file_name=_pp_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="wa_download_payslip",
-                    )
-
-            # ── Saved / unsaved state ─────────────────────────────────────
-            _wa_selected_isos = {d.isoformat() for d in _wa_selected}
-            _wa_is_saved = (
-                _wa_existing is not None
-                and _wa_selected_isos == _wa_existing_isos
-                and bool(_wa_selected_isos)
-            )
-            _wa_has_changes = not _wa_is_saved and bool(_wa_selected_isos)
-
-            if _wa_is_saved:
-                _wa_saved_ts = _wa_existing.get("created_at", "")
+                st.session_state.weekly_entry = {
+                    "week_start": _wa_week_key,
+                    "week_end":   _wa_week_end.isoformat(),
+                    "dates":      _iso_list,
+                    "summary":    _wa_sum_save,
+                }
                 st.success(
-                    f"✅ This week is saved"
-                    + (f"  ·  {_wa_saved_ts}" if _wa_saved_ts else "")
+                    f"✅ Saved {_wa_sum_save['total_shifts']} shifts "
+                    f"for {week_label(_wa_week_start)}."
                 )
-            else:
-                if _wa_has_changes:
-                    if _wa_existing:
-                        st.warning("⚠️ Unsaved changes — previous save will be overwritten.")
-                    if st.button("💾 Save Weekly Roster", key="wa_save_btn"):
-                        _iso_list = [d.isoformat() for d in _wa_selected]
-                        save_weekly_roster(
-                            week_start_date=_wa_week_key,
-                            week_end_date=_wa_week_end.isoformat(),
-                            scheduled_dates=_iso_list,
-                            source="manual",
-                        )
-                        st.session_state.weekly_entry = {
-                            "week_start": _wa_week_key,
-                            "week_end":   _wa_week_end.isoformat(),
-                            "dates":      _iso_list,
-                            "summary":    _wa_sum,
-                        }
-                        st.success(
-                            f"✅ Saved {_wa_sum['total_shifts']} shifts "
-                            f"for {week_label(_wa_week_start)}."
-                        )
-                        st.rerun()
+                st.rerun()
 
-        st.divider()
+    st.divider()
 
-        # ── Weekly chat ───────────────────────────────────────────────────
-        st.subheader("Ask about this week")
-        st.caption(
-            "Try: What if I add Saturday?  ·  What if I skip Tuesday?  ·  What is my projected payslip?"
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 4 — Pay settings
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("### 4. Pay settings")
+    st.caption("These are your personal pay details. Adjust them if your rate or hours have changed.")
+
+    _ps_c1, _ps_c2, _ps_c3, _ps_c4 = st.columns(4)
+
+    with _ps_c1:
+        _pa_rate = st.number_input(
+            "Pay rate ($/hr)",
+            min_value=0.0,
+            value=float(st.session_state.wa_hourly_rate),
+            step=0.50,
+            format="%.2f",
+            key="wa_rate_input",
         )
 
-        for _msg in st.session_state.weekly_assistant_chat:
-            with st.chat_message(_msg["role"]):
-                st.markdown(_msg["content"])
-
-        _wa_q = st.chat_input(
-            "e.g.  What if I skip Tuesday?  ·  How many shifts for $1,000 take-home?",
-            key="wa_chat_input",
+    with _ps_c2:
+        _pa_hps = st.number_input(
+            "Hours per shift",
+            min_value=0.0,
+            value=float(st.session_state.wa_hours_per_shift),
+            step=0.5,
+            format="%.1f",
+            key="wa_hps_input",
         )
 
-        if _wa_q:
-            st.session_state.weekly_assistant_chat.append(
-                {"role": "user", "content": _wa_q}
-            )
+    with _ps_c3:
+        _pa_new_tax = st.number_input(
+            "Income tax estimate (%)",
+            min_value=0.0,
+            max_value=60.0,
+            value=float(st.session_state.wa_tax_rate_pct),
+            step=0.1,
+            format="%.2f",
+            key="wa_tax_input",
+        )
 
-            # Context: current checkboxes → fall back to saved roster
-            _wa_ctx_dates = _wa_selected or [
-                _dt_wa.date.fromisoformat(d) for d in sorted(_wa_existing_isos)
-            ]
-            _wa_ctx_sum = (
-                weekly_summary(_wa_ctx_dates, hourly_rate, hours_per_shift, fuel_cost)
-                if _wa_ctx_dates else None
-            )
+    with _ps_c4:
+        _pa_new_help = st.number_input(
+            "Student loan / HELP (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=float(st.session_state.wa_help_rate_pct),
+            step=0.1,
+            format="%.2f",
+            key="wa_help_input",
+        )
 
-            # ── Deterministic routing: WA-specific questions ───────────────
-            _wa_det = detect_wa_question(_wa_q, _wa_all_dates)
-            if _wa_det is not None:
-                _wa_det_type, _wa_det_val = _wa_det
-                _wa_det_reply = format_wa_answer(
-                    _wa_det_type, _wa_det_val,
-                    _wa_ctx_dates,
-                    hourly_rate, hours_per_shift,
-                    _wa_rates_dict,
-                    week_label(_wa_week_start),
-                    pc_tax_rates=_wa_rates_dict,
-                    has_adj=False,
-                )
-                if _wa_det_reply is not None:
-                    st.session_state.weekly_assistant_chat.append(
-                        {"role": "assistant", "content": _wa_det_reply}
-                    )
-                    st.rerun()
+    # Apply changes from inputs into session state
+    _settings_changed = (
+        _pa_rate   != st.session_state.wa_hourly_rate
+        or _pa_hps != st.session_state.wa_hours_per_shift
+        or _pa_new_tax  != st.session_state.wa_tax_rate_pct
+        or _pa_new_help != st.session_state.wa_help_rate_pct
+    )
+    if _settings_changed:
+        st.session_state.wa_hourly_rate      = _pa_rate
+        st.session_state.wa_hours_per_shift  = _pa_hps
+        st.session_state.wa_tax_rate_pct     = _pa_new_tax
+        st.session_state.wa_help_rate_pct    = _pa_new_help
+        save_settings(_pa_rate, _pa_hps, fuel_cost)
 
-            # ── Deterministic routing: gross forecasting fallback ──────────
-            _wa_fc = detect_forecasting_question(_wa_q)
-            if _wa_fc is not None:
-                _ftype, _fval = _wa_fc
-                _wa_fc_reply = format_forecasting_answer(
-                    _ftype, _fval, hourly_rate, hours_per_shift, fuel_cost,
-                    week_label(_wa_week_start)
-                )
-                if _wa_fc_reply:
-                    st.session_state.weekly_assistant_chat.append(
-                        {"role": "assistant", "content": _wa_fc_reply}
-                    )
-                    st.rerun()
+    _s4_combined = _pa_new_tax + _pa_new_help
+    _s4_net      = 100.0 - _s4_combined
+    st.caption(
+        f"Combined withheld: **{_s4_combined:.2f}%**  ·  "
+        f"Est. take-home rate: **{_s4_net:.2f}%**  ·  "
+        f"Defaults derived from previous payslip "
+        f"(gross $1,529.48 · tax $313.00 · HELP $38.00)"
+    )
 
-            # ── OpenAI fallback ────────────────────────────────────────────
-            _wa_sys = (
-                "You are a helpful personal work assistant for an Amazon casual warehouse worker.\n"
-                f"Week: {week_label(_wa_week_start)}\n"
-                f"Settings: ${hourly_rate}/hr, {hours_per_shift} hrs/shift.\n"
-            )
-            if _wa_ctx_sum:
-                _wa_sys += (
-                    f"Shifts: {_wa_ctx_sum['total_shifts']} "
-                    f"({_wa_ctx_sum['weekend_shifts']} weekend), "
-                    f"{_wa_ctx_sum.get('total_hours', round(_wa_ctx_sum['total_shifts'] * hours_per_shift, 2)):.1f} h total\n"
-                    f"Dates: {[d.strftime('%A %-d %b') for d in sorted(_wa_ctx_dates)]}\n"
-                    f"Gross (est.): ${_wa_ctx_sum['gross_income']:,.2f}\n"
-                )
-            else:
-                _wa_sys += "No shifts entered for this week.\n"
-
-            if _wa_rates_dict and _wa_ctx_sum and _wa_rates_dict.get("effective_net_rate"):
-                _r   = _wa_rates_dict["effective_net_rate"]
-                _ctx_gross = _wa_ctx_sum["gross_income"]
-                _wa_sys += (
-                    f"Withholding rates — "
-                    f"net rate: {_r*100:.1f}%, "
-                    f"tax rate: {_wa_rates_dict.get('effective_tax_rate', 0)*100:.1f}%, "
-                    f"HELP rate: {_wa_rates_dict.get('effective_help_rate', 0)*100:.1f}%\n"
-                    f"Est. take-home this week: ${round(_ctx_gross * _r, 2):,.2f}\n"
-                    f"Est. take-home/shift: "
-                    f"${round(_ctx_gross * _r / _wa_ctx_sum['total_shifts'], 2) if _wa_ctx_sum['total_shifts'] > 0 else 0:,.2f}\n"
-                )
-            elif _wa_rates_dict and _wa_rates_dict.get("effective_combined_rate"):
-                _cr = _wa_rates_dict["effective_combined_rate"]
-                _wa_sys += (
-                    f"Est. tax & HELP rate: {_cr*100:.1f}%\n"
-                )
-            else:
-                _wa_sys += "No withholding rates available.\n"
-
-            _wa_sys += (
-                "\nCritical rules:\n"
-                "- NEVER calculate shifts, dates, gross pay, tax, HELP, or take-home yourself.\n"
-                "- If asked about pay/shifts/income, say the summary above shows the numbers "
-                "or ask the user to enter shifts first.\n"
-                "- Keep answers short and practical.\n"
-                "- Format money as \\$X,XXX.XX."
-            )
-
-            try:
-                _wa_resp = get_openai_client().chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[{"role": "system", "content": _wa_sys}]
-                    + [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in st.session_state.weekly_assistant_chat[-10:]
-                    ],
-                )
-                _wa_reply = safe_md(_wa_resp.choices[0].message.content)
-                st.session_state.weekly_assistant_chat.append(
-                    {"role": "assistant", "content": _wa_reply}
-                )
-            except Exception as _e:
-                st.error(f"⚠️ AI error: {_e}")
-                st.session_state.weekly_assistant_chat.pop()
-
+    _s4_c1, _s4_c2 = st.columns([1, 5])
+    with _s4_c1:
+        if st.button("↩ Reset to defaults", key="wa_reset_rates"):
+            st.session_state.wa_tax_rate_pct     = round(_WA_DEFAULT_TAX_RATE  * 100, 4)
+            st.session_state.wa_help_rate_pct    = round(_WA_DEFAULT_HELP_RATE * 100, 4)
+            st.session_state.wa_hourly_rate      = float(saved_hourly_rate)
+            st.session_state.wa_hours_per_shift  = float(saved_hours_per_shift)
+            save_settings(float(saved_hourly_rate), float(saved_hours_per_shift), fuel_cost)
             st.rerun()
 
-        if st.session_state.weekly_assistant_chat:
-            if st.button("Clear chat", key="wa_clear_chat"):
-                st.session_state.weekly_assistant_chat = []
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 5 — Projected Payslip Estimate
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("### 5. Projected Payslip Estimate")
+
+    # Always read rates from session state (updated above)
+    _wa_hourly_rate     = st.session_state.wa_hourly_rate
+    _wa_hours_per_shift = st.session_state.wa_hours_per_shift
+    _wa_tax_rate        = st.session_state.wa_tax_rate_pct  / 100.0
+    _wa_help_rate       = st.session_state.wa_help_rate_pct / 100.0
+    _wa_cr              = _wa_tax_rate + _wa_help_rate
+    _wa_net_rate        = 1.0 - _wa_cr
+
+    _wa_rates_dict = {
+        "effective_tax_rate":      _wa_tax_rate,
+        "effective_help_rate":     _wa_help_rate,
+        "effective_combined_rate": _wa_cr,
+        "effective_net_rate":      _wa_net_rate,
+    }
+
+    if not _wa_selected:
+        st.info("Select shifts above to see your projected pay estimate.")
+    else:
+        _wa_sum         = weekly_summary(_wa_selected, _wa_hourly_rate, _wa_hours_per_shift, fuel_cost)
+        _wa_total_hours = _wa_sum.get(
+            "total_hours",
+            round(_wa_sum["total_shifts"] * _wa_hours_per_shift, 2)
+        )
+        _wa_gross    = _wa_sum["gross_income"]
+        _wa_n_shifts = _wa_sum["total_shifts"]
+
+        _wa_tax_est      = round(_wa_gross * _wa_tax_rate,  2)
+        _wa_help_est     = round(_wa_gross * _wa_help_rate, 2)
+        _wa_combined_est = _wa_tax_est + _wa_help_est
+        _wa_net_est      = round(_wa_gross - _wa_combined_est, 2)
+        _wa_per_shift    = round(_wa_net_est / _wa_n_shifts, 2) if _wa_n_shifts > 0 else 0.0
+
+        # Metrics row
+        _wm1, _wm2, _wm3, _wm4 = st.columns(4)
+        _wm1.metric("Shifts",         _wa_n_shifts)
+        _wm2.metric("Total Hours",    f"{_wa_total_hours:.1f} h")
+        _wm3.metric("Gross Pay",      f"${_wa_gross:,.2f}")
+        _wm4.metric("Est. Take-Home", f"${_wa_net_est:,.2f}")
+
+        # Breakdown table
+        st.markdown(
+            "| | Amount | Rate |\n"
+            "|:---|---:|---:|\n"
+            f"| Gross income | **${_wa_gross:,.2f}** | — |\n"
+            f"| Income tax (est.) | −${_wa_tax_est:,.2f} | {_wa_tax_rate*100:.2f}% |\n"
+            f"| Student loan / HELP (est.) | −${_wa_help_est:,.2f} | {_wa_help_rate*100:.2f}% |\n"
+            f"| Total withheld (est.) | −${_wa_combined_est:,.2f} | {_wa_cr*100:.2f}% |\n"
+            f"| **Estimated take-home** | **${_wa_net_est:,.2f}** | {_wa_net_rate*100:.2f}% |\n"
+            f"| Take-home per shift | **${_wa_per_shift:,.2f}** | — |"
+        )
+
+        # Detailed payslip section
+        st.markdown("---")
+        st.markdown("**Payslip detail**")
+
+        _pp_week_range = (
+            f"{_wa_week_start.strftime('%-d %b %Y')} – "
+            f"{_wa_week_end.strftime('%-d %b %Y')}"
+        )
+        st.markdown(f"Pay period: {_pp_week_range}")
+
+        st.markdown("**Earnings**")
+        st.markdown(
+            "| Description | Hours | Rate ($/hr) | Amount ($) |\n"
+            "|:---|---:|---:|---:|\n"
+            f"| Night Shift / Casual | {_wa_total_hours:.2f} h"
+            f" | ${_wa_hourly_rate:,.2f} | ${_wa_gross:,.2f} |"
+        )
+
+        st.markdown("**Withholding (estimated)**")
+        st.markdown(
+            "| Description | Rate (%) | Amount ($) |\n"
+            "|:---|---:|---:|\n"
+            f"| Income tax (est.) | {_wa_tax_rate*100:.2f}% | −${_wa_tax_est:,.2f} |\n"
+            f"| Student loan / HELP (est.) | {_wa_help_rate*100:.2f}% | −${_wa_help_est:,.2f} |\n"
+            f"| **Total withheld (est.)** | **{_wa_cr*100:.2f}%** | **−${_wa_combined_est:,.2f}** |"
+        )
+
+        st.markdown("**Shift dates**")
+        _pp_dates_md = (
+            "| Day | Date | Hours | Rate ($/hr) |\n"
+            "|:---|:---|---:|---:|\n"
+        )
+        for _ppd in sorted(_wa_selected):
+            _pp_dates_md += (
+                f"| {_ppd.strftime('%A')} | {_ppd.strftime('%-d %b %Y')}"
+                f" | {_wa_hours_per_shift:.2f} h | ${_wa_hourly_rate:,.2f} |\n"
+            )
+        st.markdown(_pp_dates_md)
+
+        st.caption(
+            "Projected Payslip Estimate only. Not an official payslip. "
+            "Actual pay may vary due to overtime, adjustments, allowances, tax, HELP, "
+            "and employer payroll rules."
+        )
+
+        # Excel download
+        _pp_buf = build_projected_payslip_xlsx(
+            week_start=_wa_week_start,
+            week_end=_wa_week_end,
+            selected_dates=_wa_selected,
+            n_shifts=_wa_n_shifts,
+            total_hours=_wa_total_hours,
+            hourly_rate=_wa_hourly_rate,
+            hours_per_shift=_wa_hours_per_shift,
+            gross=_wa_gross,
+            tax_rate=_wa_tax_rate,
+            tax_est=_wa_tax_est,
+            help_rate=_wa_help_rate,
+            help_est=_wa_help_est,
+            combined_rate=_wa_cr,
+            combined_est=_wa_combined_est,
+            net_rate=_wa_net_rate,
+            net_est=_wa_net_est,
+            per_shift=_wa_per_shift,
+        )
+
+        if _pp_buf is None:
+            st.warning(
+                "⚠️ openpyxl is not installed. "
+                "Run: `pip install openpyxl` then restart the app."
+            )
+        else:
+            st.download_button(
+                label="⬇️ Download Projected Payslip Estimate (.xlsx)",
+                data=_pp_buf,
+                file_name=f"projected_payslip_{_wa_week_start.isoformat()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="wa_download_payslip",
+            )
+
+    st.divider()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 6 — Ask about this estimate (optional chat)
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("### 6. Ask about this estimate")
+    st.caption(
+        "Optional — ask a follow-up question: "
+        "What if I add Saturday?  ·  What if I skip Tuesday?  ·  How much will I take home?"
+    )
+
+    for _msg in st.session_state.weekly_assistant_chat:
+        with st.chat_message(_msg["role"]):
+            st.markdown(_msg["content"])
+
+    _wa_q = st.chat_input(
+        "e.g.  What if I skip Tuesday?  ·  How many shifts for $1,000 take-home?",
+        key="wa_chat_input",
+    )
+
+    if _wa_q:
+        st.session_state.weekly_assistant_chat.append(
+            {"role": "user", "content": _wa_q}
+        )
+
+        _wa_ctx_dates = _wa_selected or [
+            _dt_wa.date.fromisoformat(d) for d in sorted(_wa_existing_isos)
+        ]
+        _wa_ctx_sum = (
+            weekly_summary(_wa_ctx_dates, _wa_hourly_rate, _wa_hours_per_shift, fuel_cost)
+            if _wa_ctx_dates else None
+        )
+
+        # Deterministic WA routing
+        _wa_det = detect_wa_question(_wa_q, _wa_all_dates)
+        if _wa_det is not None:
+            _wa_det_type, _wa_det_val = _wa_det
+            _wa_det_reply = format_wa_answer(
+                _wa_det_type, _wa_det_val,
+                _wa_ctx_dates,
+                _wa_hourly_rate, _wa_hours_per_shift,
+                _wa_rates_dict,
+                week_label(_wa_week_start),
+                pc_tax_rates=_wa_rates_dict,
+                has_adj=False,
+            )
+            if _wa_det_reply is not None:
+                st.session_state.weekly_assistant_chat.append(
+                    {"role": "assistant", "content": _wa_det_reply}
+                )
                 st.rerun()
+
+        # Deterministic forecasting fallback
+        _wa_fc = detect_forecasting_question(_wa_q)
+        if _wa_fc is not None:
+            _ftype, _fval = _wa_fc
+            _wa_fc_reply = format_forecasting_answer(
+                _ftype, _fval, _wa_hourly_rate, _wa_hours_per_shift, fuel_cost,
+                week_label(_wa_week_start)
+            )
+            if _wa_fc_reply:
+                st.session_state.weekly_assistant_chat.append(
+                    {"role": "assistant", "content": _wa_fc_reply}
+                )
+                st.rerun()
+
+        # OpenAI fallback
+        _wa_sys = (
+            "You are a helpful personal work assistant.\n"
+            f"Week: {week_label(_wa_week_start)}\n"
+            f"Settings: ${_wa_hourly_rate}/hr, {_wa_hours_per_shift} hrs/shift.\n"
+        )
+        if _wa_ctx_sum:
+            _wa_sys += (
+                f"Shifts: {_wa_ctx_sum['total_shifts']} "
+                f"({_wa_ctx_sum.get('weekend_shifts',0)} weekend), "
+                f"{_wa_ctx_sum.get('total_hours', round(_wa_ctx_sum['total_shifts'] * _wa_hours_per_shift, 2)):.1f} h total\n"
+                f"Dates: {[d.strftime('%A %-d %b') for d in sorted(_wa_ctx_dates)]}\n"
+                f"Gross (est.): ${_wa_ctx_sum['gross_income']:,.2f}\n"
+            )
+        else:
+            _wa_sys += "No shifts entered for this week.\n"
+
+        if _wa_rates_dict and _wa_ctx_sum and _wa_rates_dict.get("effective_net_rate"):
+            _r        = _wa_rates_dict["effective_net_rate"]
+            _ctx_gross = _wa_ctx_sum["gross_income"]
+            _wa_sys += (
+                f"Withholding — net: {_r*100:.1f}%, "
+                f"tax: {_wa_rates_dict.get('effective_tax_rate',0)*100:.1f}%, "
+                f"HELP: {_wa_rates_dict.get('effective_help_rate',0)*100:.1f}%\n"
+                f"Est. take-home: ${round(_ctx_gross * _r, 2):,.2f}\n"
+                f"Est. take-home/shift: "
+                f"${round(_ctx_gross * _r / _wa_ctx_sum['total_shifts'], 2) if _wa_ctx_sum['total_shifts'] > 0 else 0:,.2f}\n"
+            )
+
+        _wa_sys += (
+            "\nCritical rules:\n"
+            "- NEVER calculate shifts, dates, gross pay, tax, HELP, or take-home yourself.\n"
+            "- If asked about pay/shifts/income, refer to the summary shown on screen "
+            "or ask the user to select shifts first.\n"
+            "- Keep answers short and practical.\n"
+            "- Format money as \\$X,XXX.XX."
+        )
+
+        try:
+            _wa_resp = get_openai_client().chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "system", "content": _wa_sys}]
+                + [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.weekly_assistant_chat[-10:]
+                ],
+            )
+            _wa_reply = safe_md(_wa_resp.choices[0].message.content)
+            st.session_state.weekly_assistant_chat.append(
+                {"role": "assistant", "content": _wa_reply}
+            )
+        except Exception as _e:
+            st.error(f"⚠️ AI error: {_e}")
+            st.session_state.weekly_assistant_chat.pop()
+
+        st.rerun()
+
+    if st.session_state.weekly_assistant_chat:
+        if st.button("Clear chat", key="wa_clear_chat"):
+            st.session_state.weekly_assistant_chat = []
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
